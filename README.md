@@ -1,0 +1,2 @@
+# ProjectTrendism-Server
+Server Part
