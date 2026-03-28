@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import Base, engine
-from app.routers import keywords
+from app.routers import keywords, craft
 
 Base.metadata.create_all(bind=engine)
 
@@ -15,6 +15,7 @@ app.add_middleware(
 )
 
 app.include_router(keywords.router)
+app.include_router(craft.router)
 
 @app.get("/")
 def root():
