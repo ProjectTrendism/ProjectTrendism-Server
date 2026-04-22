@@ -20,6 +20,8 @@ class PredictResponse(BaseModel):
     distance:       float # 예측값과 실제값의 오차
     final_value:    float
     item_id:        int
+    item_name:        str   # AI 생성: "청량숲의 감성버섯"
+    item_description: str   # AI 생성: "엘프가 가꾼 차가운..."
 
 class RecipeBookEntry(BaseModel):
     id:             int

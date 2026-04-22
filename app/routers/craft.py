@@ -2,12 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.keyword import Keyword
-from app.models.craft import CraftCombination, RecipeBook
+from app.models.craft import CraftCombination, RecipeBook, GeneratedItem
 from app.schemas.craft import (
     CombineRequest, CombineResponse,
     PredictRequest, PredictResponse,
     RecipeBookEntry
 )
+from app.services.claude_service import generate_item_metadata
 import uuid, math
 
 router = APIRouter(prefix="/craft", tags=["Craft"])
@@ -91,6 +92,7 @@ def combine_keywords(body: CombineRequest, db: Session = Depends(get_db)):
 
 
 # ── POST /craft/predict ─────────────────────────────────
+# ── POST /craft/predict ─────────────────────────────────
 @router.post("/predict")
 def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
     combo = db.query(CraftCombination).filter(
@@ -121,6 +123,28 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
     grade = calc_grade(distance)
     final_value = calc_final_value(combo.estimated_value, grade)
 
+    # 키워드 정보 조회 (Claude 호출용)
+    keywords = db.query(Keyword).filter(Keyword.id.in_(combo.keyword_ids)).all()
+    keyword_names = [k.name for k in keywords]
+    keyword_descriptions = [k.description for k in keywords]
+
+    # ── Claude 호출: 아이템 이름/설명 생성 ──
+    try:
+        ai_result = generate_item_metadata(
+            keyword_names=keyword_names,
+            keyword_descriptions=keyword_descriptions,
+            grade=grade
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail={
+            "status": "error",
+            "error_code": "AI_GENERATION_FAILED",
+            "message": f"아이템 생성 중 오류가 발생했습니다: {str(e)}"
+        })
+
+    item_name = ai_result["name"]
+    item_description = ai_result["description"]
+
     # 조합 사용 완료 처리
     combo.is_used = True
     db.commit()
@@ -131,28 +155,43 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
         RecipeBook.keyword_ids == sorted_ids
     ).first()
 
-    keywords = db.query(Keyword).filter(Keyword.id.in_(combo.keyword_ids)).all()
-    keyword_names = [k.name for k in keywords]
-
     if not recipe:
         recipe = RecipeBook(
             keyword_ids=sorted_ids,
             keyword_names=keyword_names,
             best_grade=grade,
             success_count=1,
-            hint_unlocked=False
+            hint_unlocked=False,
+            generated_name=item_name,
+            generated_description=item_description
         )
         db.add(recipe)
     else:
         recipe.success_count += 1
         grade_order = {"S": 0, "A": 1, "B": 2, "C": 3}
+        # 최고 등급 갱신 시 이름/설명도 같이 갱신
         if grade_order[grade] < grade_order[recipe.best_grade]:
             recipe.best_grade = grade
+            recipe.generated_name = item_name
+            recipe.generated_description = item_description
         if recipe.success_count >= 3:
             recipe.hint_unlocked = True
 
     db.commit()
     db.refresh(recipe)
+
+    # 히스토리 레코드 생성
+    history = GeneratedItem(
+        recipe_id=recipe.id,
+        keyword_ids=combo.keyword_ids,
+        keyword_names=keyword_names,
+        grade=grade,
+        final_value=final_value,
+        generated_name=item_name,
+        generated_description=item_description
+    )
+    db.add(history)
+    db.commit()
 
     return {
         "status": "success",
@@ -160,7 +199,9 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
             "grade": grade,
             "distance": round(distance, 2),
             "final_value": final_value,
-            "item_id": recipe.id
+            "item_id": recipe.id,
+            "item_name": item_name,
+            "item_description": item_description
         }
     }
 
