@@ -16,14 +16,13 @@ class MarketItemResponse(BaseModel):
     base_value:  float
     stock:       int
     status:      str
-
     class Config:
         from_attributes = True
 
 class SellRequest(BaseModel):
     item_id:       int
     quantity:      int = Field(1, ge=1)
-    discount_rate: float = Field(0.0, ge=0.0, le=0.7)  # 최대 70% 할인
+    discount_rate: float = Field(0.0, ge=0.0, le=0.7)
 
 class SellResponse(BaseModel):
     revenue:         float
@@ -44,10 +43,28 @@ class SettlementResponse(BaseModel):
     management_cost:  float
     net_profit:       float
     penalty:          bool
-
     class Config:
         from_attributes = True
 
 class AdjustNodeRequest(BaseModel):
-    node:      str   # "marketing" / "rent" / "management"
+    node:      str
     new_value: float = Field(..., ge=0)
+
+class SalesAnalysisResponse(BaseModel):
+    summary:          str
+    keyword_analysis: str
+    timing_analysis:  str
+    price_analysis:   str
+    next_action:      str
+    score:            int
+
+class BuyerSimulationDay(BaseModel):
+    day:           int
+    trend_index:   float
+    buyers:        int
+    sold:          int
+    cumulative_revenue: float
+
+class PriceAdjustRequest(BaseModel):
+    item_id:   int
+    new_price: float = Field(..., gt=0)

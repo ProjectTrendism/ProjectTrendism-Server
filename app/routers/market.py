@@ -2,24 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.market import MarketItem, Settlement
+from app.models.keyword import Keyword
 from app.schemas.market import (
     MarketItemCreate, MarketItemResponse,
     SellRequest, SellResponse,
     TrendDataPoint, SettlementResponse,
-    AdjustNodeRequest
+    AdjustNodeRequest, PriceAdjustRequest
 )
-import math
+from app.services.claude_service import analyze_sales_performance
+import math, random
 
 router = APIRouter(prefix="/market", tags=["Market"])
 
 
 def calculate_trend_index(item: MarketItem, current_day: int) -> float:
-    """
-    트렌드 곡선 계산
-    - 상승기: 로그 곡선
-    - 하락기: 지수 감소
-    - 180일 후 사망
-    """
     elapsed = current_day - item.release_day
     if elapsed < 0:
         return 0.0
@@ -41,20 +37,15 @@ def calculate_trend_index(item: MarketItem, current_day: int) -> float:
     return round(index, 2)
 
 
-# ── POST /market/items  아이템 판매 등록 ────────────────
 @router.post("/items", status_code=201)
 def register_item(body: MarketItemCreate, db: Session = Depends(get_db)):
     item = MarketItem(**body.dict())
     db.add(item)
     db.commit()
     db.refresh(item)
-    return {
-        "status": "success",
-        "data": MarketItemResponse.from_orm(item).dict()
-    }
+    return {"status": "success", "data": MarketItemResponse.from_orm(item).dict()}
 
 
-# ── GET /market/trend/{item_id}  트렌드 차트 데이터 ─────
 @router.get("/trend/{item_id}")
 def get_trend(item_id: int, days: int = 60, db: Session = Depends(get_db)):
     item = db.query(MarketItem).filter(MarketItem.id == item_id).first()
@@ -83,7 +74,6 @@ def get_trend(item_id: int, days: int = 60, db: Session = Depends(get_db)):
     }
 
 
-# ── POST /market/sell  판매 처리 ────────────────────────
 @router.post("/sell")
 def sell_item(body: SellRequest, db: Session = Depends(get_db)):
     item = db.query(MarketItem).filter(MarketItem.id == body.item_id).first()
@@ -105,13 +95,11 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
     sell_price = item.base_value * (trend_index / 100) * (1 - body.discount_rate)
     revenue = round(sell_price * body.quantity, 1)
 
-    # 재고 차감
     item.stock -= body.quantity
     if item.stock == 0:
         item.status = "SOLD_OUT"
     db.commit()
 
-    # 정산 업데이트
     settlement = db.query(Settlement).filter(Settlement.season_id == 1).first()
     if not settlement:
         settlement = Settlement(
@@ -149,7 +137,6 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
     }
 
 
-# ── GET /market/settlement/{season_id}  정산 조회 ───────
 @router.get("/settlement/{season_id}")
 def get_settlement(season_id: int, db: Session = Depends(get_db)):
     settlement = db.query(Settlement).filter(
@@ -180,7 +167,6 @@ def get_settlement(season_id: int, db: Session = Depends(get_db)):
     }
 
 
-# ── PATCH /market/settlement/{season_id}/adjust  노드 조절 ─
 @router.patch("/settlement/{season_id}/adjust")
 def adjust_node(season_id: int, body: AdjustNodeRequest, db: Session = Depends(get_db)):
     settlement = db.query(Settlement).filter(
@@ -217,3 +203,240 @@ def adjust_node(season_id: int, body: AdjustNodeRequest, db: Session = Depends(g
     db.commit()
 
     return get_settlement(season_id, db)
+
+
+# ── POST /market/analyze/{item_id}  판매 성과 분석 ──────
+@router.post("/analyze/{item_id}")
+def analyze_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(MarketItem).filter(MarketItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "ITEM_NOT_FOUND",
+            "message": f"아이템 ID {item_id}가 존재하지 않습니다"
+        })
+
+    # 키워드 이름 조회
+    keyword_names = []
+    if item.keyword_ids:
+        keywords = db.query(Keyword).filter(Keyword.id.in_(item.keyword_ids)).all()
+        keyword_names = [k.name for k in keywords]
+
+    trend_index = calculate_trend_index(item, item.current_day)
+    days_on_market = max(0, item.current_day - item.release_day)
+
+    # 매출 계산 (정산 테이블에서)
+    settlement = db.query(Settlement).filter(Settlement.season_id == 1).first()
+    revenue = settlement.total_revenue if settlement else 0
+
+    # 서버 자체 분석 (Claude 호출 없이 빠르게 제공)
+    server_analysis = _build_server_analysis(item, trend_index, days_on_market)
+
+    # Claude AI 분석
+    try:
+        ai_analysis = analyze_sales_performance(
+            item_name=item.item_name,
+            keyword_names=keyword_names,
+            grade=item.grade,
+            trend_index=trend_index,
+            revenue=revenue,
+            stock_remaining=item.stock,
+            discount_rate=0.0,
+            days_on_market=days_on_market
+        )
+    except RuntimeError:
+        ai_analysis = None
+
+    return {
+        "status": "success",
+        "data": {
+            "item_id": item_id,
+            "item_name": item.item_name,
+            "server_analysis": server_analysis,
+            "ai_analysis": ai_analysis
+        }
+    }
+
+
+def _build_server_analysis(item: MarketItem, trend_index: float, days_on_market: int) -> dict:
+    """Claude 호출 없이 서버에서 즉시 계산하는 분석"""
+    issues = []
+    suggestions = []
+
+    # 등급 분석
+    if item.grade in ("C", "B"):
+        issues.append({
+            "type": "GRADE",
+            "severity": "HIGH" if item.grade == "C" else "MEDIUM",
+            "message": f"제작 등급이 {item.grade}등급입니다. 등급이 낮으면 트렌드 보정이 약해집니다."
+        })
+        suggestions.append("키워드의 RGB 특성을 더 정확히 예측해 등급을 올려보세요.")
+
+    # 타이밍 분석
+    if days_on_market > 60:
+        issues.append({
+            "type": "TIMING",
+            "severity": "HIGH",
+            "message": f"출시 후 {days_on_market}일 경과. 트렌드가 크게 하락했습니다."
+        })
+        suggestions.append("트렌드 정점(30일)이 지나기 전에 판매를 완료하세요.")
+    elif days_on_market > 30:
+        issues.append({
+            "type": "TIMING",
+            "severity": "MEDIUM",
+            "message": "트렌드 정점을 지났습니다. 가격이 하락 중이에요."
+        })
+        suggestions.append("할인 판매를 고려하거나 빠르게 재고를 소진하세요.")
+
+    # 트렌드 분석
+    if trend_index < 20:
+        issues.append({
+            "type": "TREND",
+            "severity": "HIGH",
+            "message": f"트렌드 지수가 {trend_index}으로 매우 낮습니다."
+        })
+    elif trend_index >= 80:
+        suggestions.append("트렌드 지수가 높습니다! 지금이 최적의 판매 타이밍이에요.")
+
+    # 재고 분석
+    if item.stock > 3 and days_on_market > 30:
+        issues.append({
+            "type": "STOCK",
+            "severity": "MEDIUM",
+            "message": f"재고 {item.stock}개가 남아있습니다. 할인 판매를 고려하세요."
+        })
+        suggestions.append("할인율을 20~30%로 설정해 재고를 빠르게 소진하세요.")
+
+    # 종합 점수
+    score = 100
+    for issue in issues:
+        if issue["severity"] == "HIGH":
+            score -= 25
+        elif issue["severity"] == "MEDIUM":
+            score -= 15
+    score = max(0, score)
+
+    return {
+        "issues": issues,
+        "suggestions": suggestions,
+        "overall_score": score,
+        "trend_status": "상승" if days_on_market <= 30 else "하락",
+        "optimal_sell_window": f"Day {item.release_day + 20} ~ Day {item.release_day + 40}"
+    }
+
+
+# ── GET /market/simulate/{item_id}  구매자 시뮬레이션 ───
+@router.get("/simulate/{item_id}")
+def simulate_buyers(
+    item_id: int,
+    days: int = 60,
+    base_buyers: int = 10,
+    db: Session = Depends(get_db)
+):
+    item = db.query(MarketItem).filter(MarketItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "ITEM_NOT_FOUND",
+            "message": f"아이템 ID {item_id}가 존재하지 않습니다"
+        })
+
+    grade_multiplier = {"S": 2.0, "A": 1.5, "B": 1.0, "C": 0.5}
+    g_mult = grade_multiplier.get(item.grade, 1.0)
+
+    simulation = []
+    cumulative_revenue = 0.0
+    remaining_stock = item.stock
+
+    for d in range(days):
+        current_day = item.release_day + d
+        trend = calculate_trend_index(item, current_day)
+
+        # 구매자 수 = base × (trend/100) × grade보정 × 약간의 랜덤
+        if trend <= 0 or remaining_stock <= 0:
+            buyers = 0
+            sold = 0
+        else:
+            raw_buyers = base_buyers * (trend / 100) * g_mult
+            noise = random.uniform(0.7, 1.3)
+            buyers = max(0, int(raw_buyers * noise))
+
+            # 실제 판매 (구매자 중 일부만 구매)
+            buy_prob = min(0.8, trend / 120)
+            sold = 0
+            for _ in range(min(buyers, remaining_stock)):
+                if random.random() < buy_prob:
+                    sold += 1
+
+            sold = min(sold, remaining_stock)
+            remaining_stock -= sold
+            day_revenue = sold * item.base_value * (trend / 100)
+            cumulative_revenue += day_revenue
+
+        simulation.append({
+            "day": current_day,
+            "trend_index": trend,
+            "buyers_visited": buyers,
+            "units_sold": sold,
+            "remaining_stock": remaining_stock,
+            "cumulative_revenue": round(cumulative_revenue, 1)
+        })
+
+        if remaining_stock <= 0:
+            break
+
+    # 요약 통계
+    total_sold = item.stock - remaining_stock
+    peak_day = max(simulation, key=lambda x: x["buyers_visited"])
+
+    return {
+        "status": "success",
+        "data": {
+            "item_id": item_id,
+            "item_name": item.item_name,
+            "grade": item.grade,
+            "initial_stock": item.stock + total_sold,
+            "summary": {
+                "total_sold": total_sold,
+                "remaining_stock": remaining_stock,
+                "total_revenue": round(cumulative_revenue, 1),
+                "sellout_day": next(
+                    (s["day"] for s in simulation if s["remaining_stock"] == 0),
+                    None
+                ),
+                "peak_buyers_day": peak_day["day"],
+                "peak_buyers_count": peak_day["buyers_visited"]
+            },
+            "daily_data": simulation
+        }
+    }
+
+
+# ── PATCH /market/price  가격 직접 조정 ─────────────────
+@router.patch("/price")
+def adjust_price(body: PriceAdjustRequest, db: Session = Depends(get_db)):
+    item = db.query(MarketItem).filter(MarketItem.id == body.item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "ITEM_NOT_FOUND",
+            "message": f"아이템 ID {body.item_id}가 존재하지 않습니다"
+        })
+
+    old_price = item.base_value
+    item.base_value = body.new_price
+    db.commit()
+
+    change_pct = round((body.new_price - old_price) / old_price * 100, 1) if old_price > 0 else 0
+
+    return {
+        "status": "success",
+        "data": {
+            "item_id": item.id,
+            "item_name": item.item_name,
+            "old_price": old_price,
+            "new_price": body.new_price,
+            "change_percent": change_pct,
+            "message": f"가격이 {old_price} → {body.new_price} 골드로 변경되었습니다 ({change_pct:+.1f}%)"
+        }
+    }

@@ -1,0 +1,202 @@
+[
+    {
+        "name": "허브 할머니",
+        "location": "마을",
+        "dialogue": "이 버섯은 숲 요정이 키운 거란다. 향이 특별하지?",
+        "keyword_drops": [1, 6],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "떠돌이 상인 루카",
+        "location": "마을",
+        "dialogue": "최근 MZ 모험가들 사이에서 이게 핫하다니까!",
+        "keyword_drops": [21, 22],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "대장장이 브록",
+        "location": "마을",
+        "dialogue": "드워프 강철이라... 이걸로 뭘 만들 생각이냐?",
+        "keyword_drops": [3, 20],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "마을 이장 한스",
+        "location": "마을",
+        "dialogue": "요즘 젊은이들은 가성비를 따진다더군. 나도 배워야 해.",
+        "keyword_drops": [22, 27],
+        "drop_rate": 0.5,
+        "is_active": true
+    },
+    {
+        "name": "점쟁이 미스라",
+        "location": "마을",
+        "dialogue": "수정 구슬에 이상한 빛이... 전설의 기운이 느껴져.",
+        "keyword_drops": [4, 30],
+        "drop_rate": 0.4,
+        "is_active": true
+    },
+    {
+        "name": "숲지기 엘라",
+        "location": "숲",
+        "dialogue": "이 숲에는 야광 이끼가 자라는 비밀 장소가 있어.",
+        "keyword_drops": [1, 9],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "요정 티나",
+        "location": "숲",
+        "dialogue": "우리가 짠 실은 달빛 아래서만 빛나. 투명하면서도 따뜻하지.",
+        "keyword_drops": [6, 16, 15],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "수렵꾼 가론",
+        "location": "숲",
+        "dialogue": "고블린 가죽은 질기지만, 제대로 가공하면 바삭한 질감이 나와.",
+        "keyword_drops": [2, 11],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "은둔 마법사 노엘",
+        "location": "숲",
+        "dialogue": "마나 수정을 차갑게 다루면 순도가 올라간다... 비밀이야.",
+        "keyword_drops": [4, 14],
+        "drop_rate": 0.5,
+        "is_active": true
+    },
+    {
+        "name": "나무 정령 루트",
+        "location": "숲",
+        "dialogue": "자연은 미니멀해야 아름답지. 과하면 썩는 법이야.",
+        "keyword_drops": [9, 17, 29],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "광부 도리",
+        "location": "동굴",
+        "dialogue": "이 동굴 깊은 곳에서 글리터 광석을 봤다니까!",
+        "keyword_drops": [3, 19],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "동굴 트롤 그룩",
+        "location": "동굴",
+        "dialogue": "그룩의 뼈, 단단해. 너 가져가. 근데 매트하게 다뤄.",
+        "keyword_drops": [7, 20],
+        "drop_rate": 0.8,
+        "is_active": true
+    },
+    {
+        "name": "보석 감정사 클라라",
+        "location": "동굴",
+        "dialogue": "이 수정은... 럭셔리 등급이야. 형광빛이 도는 게 특징이지.",
+        "keyword_drops": [4, 24, 13],
+        "drop_rate": 0.5,
+        "is_active": true
+    },
+    {
+        "name": "박쥐 조련사 빅터",
+        "location": "동굴",
+        "dialogue": "야광 이끼를 먹은 박쥐는 눈이 빛나. 이세계 느낌이랄까.",
+        "keyword_drops": [9, 26],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "유령 드워프 볼드",
+        "location": "동굴",
+        "dialogue": "나는 300년 전 장인이야... 빈티지 기술을 알려주지.",
+        "keyword_drops": [3, 12],
+        "drop_rate": 0.5,
+        "is_active": true
+    },
+    {
+        "name": "사막 유목민 자라",
+        "location": "사막",
+        "dialogue": "선인장 즙은 힐링 효과가 있어. 따뜻하게 데워 마셔봐.",
+        "keyword_drops": [8, 25, 15],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "모래 마법사 카심",
+        "location": "사막",
+        "dialogue": "뜨거운 모래 위에서 만든 유리... 투명하고 코어한 매력이 있지.",
+        "keyword_drops": [16, 28],
+        "drop_rate": 0.5,
+        "is_active": true
+    },
+    {
+        "name": "오아시스 상인 나디아",
+        "location": "사막",
+        "dialogue": "가성비 좋은 재료를 원해? 선인장 즙이랑 트롤 뼈 조합 추천!",
+        "keyword_drops": [8, 7, 22],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "피닉스 관찰자 이그니스",
+        "location": "사막",
+        "dialogue": "피닉스 깃털은 100년에 한 번... 전설의 맛을 아는 자만 찾지.",
+        "keyword_drops": [10, 30],
+        "drop_rate": 0.3,
+        "is_active": true
+    },
+    {
+        "name": "사막 도마뱀 루비",
+        "location": "사막",
+        "dialogue": "맥시멀하게 사는 게 내 스타일이야. 화려하게 살자!",
+        "keyword_drops": [18, 23],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "트렌드 분석가 제이",
+        "location": "시장",
+        "dialogue": "요즘 킹받는 아이템이 대세야. MZ감성 없으면 안 팔려.",
+        "keyword_drops": [21, 23],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "골동품상 로제",
+        "location": "시장",
+        "dialogue": "레트로가 돌아왔어. 빈티지한 감성에 글리터를 더하면 완벽하지.",
+        "keyword_drops": [27, 12, 19],
+        "drop_rate": 0.6,
+        "is_active": true
+    },
+    {
+        "name": "비건 요리사 민트",
+        "location": "시장",
+        "dialogue": "요정 실로 만든 면에 엘프 버섯을 올려... 비건 파스타 완성!",
+        "keyword_drops": [1, 6, 29],
+        "drop_rate": 0.7,
+        "is_active": true
+    },
+    {
+        "name": "용사 길드장 레오",
+        "location": "시장",
+        "dialogue": "용의 비늘을 구해온 자에게 전설의 칭호를 내리겠다!",
+        "keyword_drops": [5, 24],
+        "drop_rate": 0.3,
+        "is_active": true
+    },
+    {
+        "name": "밀수꾼 섀도우",
+        "location": "시장",
+        "dialogue": "쉿... 고블린 가죽이랑 마나 수정, 좋은 가격에 줄게.",
+        "keyword_drops": [2, 4],
+        "drop_rate": 0.8,
+        "is_active": true
+    }
+]

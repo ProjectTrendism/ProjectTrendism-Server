@@ -45,3 +45,17 @@ class GeneratedItem(Base):
     generated_name        = Column(String, nullable=False)
     generated_description = Column(String, nullable=False)
     created_at    = Column(DateTime, server_default=func.now())
+
+class GeneratedItemCache(Base):
+    """
+    사전 생성된 아이템 메타데이터 및 이미지 경로 캐시 테이블
+    """
+    __tablename__ = "generated_item_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # 정렬된 키워드 ID 배열과 등급을 조합한 고유 키 (예: "1,11,21|S")
+    keyword_ids_key = Column(String, unique=True, index=True, nullable=False) 
+    grade = Column(String, nullable=False)           # S, A, B, C
+    name = Column(String, nullable=False)            # Anthropic이 생성한 이름
+    description = Column(String, nullable=False)     # Anthropic이 생성한 설명
+    image_url = Column(String, nullable=True)        # 무료 API가 생성한 이미지 저장 경로

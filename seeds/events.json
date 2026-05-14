@@ -1,0 +1,92 @@
+[
+    {
+        "name": "장터의 날",
+        "description": "시장에 상인들이 모여든다! 시장 NPC 드랍률 +20%",
+        "event_type": "FIXED",
+        "trigger_day": 1,
+        "trigger_prob": 1.0,
+        "keyword_rewards": [],
+        "is_active": true
+    },
+    {
+        "name": "보름달의 밤",
+        "description": "보름달 아래 요정들이 활동한다. 숲 NPC가 RARE 키워드를 드랍할 확률 상승.",
+        "event_type": "FIXED",
+        "trigger_day": 3,
+        "trigger_prob": 1.0,
+        "keyword_rewards": [9],
+        "is_active": true
+    },
+    {
+        "name": "드워프 제련 축제",
+        "description": "동굴에서 드워프들이 축제를 연다. 동굴 NPC 전원 활성화.",
+        "event_type": "FIXED",
+        "trigger_day": 5,
+        "trigger_prob": 1.0,
+        "keyword_rewards": [3],
+        "is_active": true
+    },
+    {
+        "name": "사막 신기루",
+        "description": "사막에 신비로운 신기루가 나타났다. 히든 NPC 등장!",
+        "event_type": "FIXED",
+        "trigger_day": 7,
+        "trigger_prob": 1.0,
+        "keyword_rewards": [10, 30],
+        "is_active": true
+    },
+    {
+        "name": "떠돌이 행상단",
+        "description": "떠돌이 상인 무리가 마을을 지나간다. 랜덤 키워드 1개 획득 기회!",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.3,
+        "keyword_rewards": [22, 21],
+        "is_active": true
+    },
+    {
+        "name": "마나 폭풍",
+        "description": "갑작스러운 마나 폭풍! 마나 수정 관련 키워드 드랍률 상승.",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.25,
+        "keyword_rewards": [4],
+        "is_active": true
+    },
+    {
+        "name": "고블린 습격",
+        "description": "고블린 무리가 출몰했다! 전투 후 가죽을 얻을 수 있다.",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.35,
+        "keyword_rewards": [2],
+        "is_active": true
+    },
+    {
+        "name": "트렌드 속보",
+        "description": "긴급! 새로운 트렌드가 떠오르고 있다. CONCEPT 키워드 힌트 공개.",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.2,
+        "keyword_rewards": [23, 28],
+        "is_active": true
+    },
+    {
+        "name": "요정의 선물",
+        "description": "숲의 요정이 선물을 남겼다. 요정 실을 발견할 수 있다!",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.2,
+        "keyword_rewards": [6],
+        "is_active": true
+    },
+    {
+        "name": "밀수 단속",
+        "description": "보안관이 밀수꾼을 단속 중! 시장 일부 NPC 비활성화.",
+        "event_type": "RANDOM",
+        "trigger_day": null,
+        "trigger_prob": 0.15,
+        "keyword_rewards": [],
+        "is_active": true
+    }
+]

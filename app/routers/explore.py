@@ -3,13 +3,102 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.explore import Season, NPC, Event, PlayerInventory
 from app.models.keyword import Keyword
+from app.models.frequency import KeywordFrequency, HiddenKeyword
 from app.schemas.explore import (
     SeasonStatus, ActionRequest, ActionResult,
     EventResponse, InventoryItem, DayEndResult
 )
+from app.schemas.frequency import NPCListItem
 import random
 
 router = APIRouter(prefix="/explore", tags=["Explore"])
+
+
+# ── 빈도수 업데이트 헬퍼 ─────────────────────────────────
+def _update_frequency(season_id: int, keyword_id: int, npc_id: int | None, db: Session):
+    """키워드 드랍 시 빈도수 테이블 업데이트"""
+    freq = db.query(KeywordFrequency).filter(
+        KeywordFrequency.season_id == season_id,
+        KeywordFrequency.keyword_id == keyword_id
+    ).first()
+
+    if not freq:
+        freq = KeywordFrequency(
+            season_id=season_id,
+            keyword_id=keyword_id,
+            mention_count=1,
+            drop_count=1,
+            npc_sources=[npc_id] if npc_id else []
+        )
+        db.add(freq)
+    else:
+        freq.mention_count += 1
+        freq.drop_count += 1
+        if npc_id and npc_id not in (freq.npc_sources or []):
+            sources = list(freq.npc_sources or [])
+            sources.append(npc_id)
+            freq.npc_sources = sources
+
+    db.flush()
+
+
+def _check_hidden_unlocks(season_id: int, keyword_id: int, npc_id: int | None, db: Session):
+    """히든 키워드 해금 조건 체크"""
+    unlocked_items = []
+
+    hidden_keywords = db.query(HiddenKeyword).filter(
+        HiddenKeyword.is_unlocked == False
+    ).all()
+
+    for hk in hidden_keywords:
+        condition = hk.unlock_condition or {}
+        should_unlock = False
+
+        if hk.unlock_type == "FREQUENCY":
+            target_kw_id = condition.get("target_keyword_id")
+            threshold = condition.get("threshold", 5)
+            freq = db.query(KeywordFrequency).filter(
+                KeywordFrequency.season_id == season_id,
+                KeywordFrequency.keyword_id == target_kw_id
+            ).first()
+            if freq and freq.mention_count >= threshold:
+                should_unlock = True
+
+        elif hk.unlock_type == "NPC_COMBO":
+            required_npcs = set(condition.get("required_npcs", []))
+            # 이번 시즌에서 대화한 NPC 목록 (빈도수 테이블의 npc_sources 통합)
+            all_sources = set()
+            freqs = db.query(KeywordFrequency).filter(
+                KeywordFrequency.season_id == season_id
+            ).all()
+            for f in freqs:
+                all_sources.update(f.npc_sources or [])
+            if required_npcs.issubset(all_sources):
+                should_unlock = True
+
+        if should_unlock:
+            hk.is_unlocked = True
+            # 히든 키워드를 인벤토리에 자동 추가
+            existing = db.query(PlayerInventory).filter(
+                PlayerInventory.season_id == season_id,
+                PlayerInventory.keyword_id == hk.keyword_id
+            ).first()
+            if not existing:
+                db.add(PlayerInventory(
+                    season_id=season_id,
+                    keyword_id=hk.keyword_id
+                ))
+            keyword = db.query(Keyword).filter(Keyword.id == hk.keyword_id).first()
+            unlocked_items.append({
+                "keyword_id": hk.keyword_id,
+                "keyword_name": keyword.name if keyword else "???",
+                "hint_text": hk.hint_text
+            })
+
+    if unlocked_items:
+        db.flush()
+
+    return unlocked_items
 
 
 # ── POST /explore/start  시즌 시작 ──────────────────────
@@ -59,6 +148,19 @@ def get_status(db: Session = Depends(get_db)):
     }
 
 
+# ── GET /explore/npcs  NPC 목록 조회 ────────────────────
+@router.get("/npcs")
+def get_npcs(location: str | None = None, db: Session = Depends(get_db)):
+    query = db.query(NPC).filter(NPC.is_active == True)
+    if location:
+        query = query.filter(NPC.location == location)
+    npcs = query.all()
+    return {
+        "status": "success",
+        "data": [NPCListItem.from_orm(n).dict() for n in npcs]
+    }
+
+
 # ── POST /explore/action  행동 처리 ─────────────────────
 @router.post("/action")
 def do_action(body: ActionRequest, db: Session = Depends(get_db)):
@@ -72,7 +174,6 @@ def do_action(body: ActionRequest, db: Session = Depends(get_db)):
 
     # 22시 이후 보안관 체포
     if season.current_time >= 22:
-        # 랜덤 키워드 1~2개 압수
         inventory = db.query(PlayerInventory).filter(
             PlayerInventory.season_id == season.id
         ).all()
@@ -126,6 +227,29 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
             "warning": warning
         }}
 
+    # NPC가 보유한 모든 키워드의 mention_count 증가 (대화하면 언급은 항상 발생)
+    for kw_id in (npc.keyword_drops or []):
+        freq = db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == season.id,
+            KeywordFrequency.keyword_id == kw_id
+        ).first()
+        if not freq:
+            freq = KeywordFrequency(
+                season_id=season.id,
+                keyword_id=kw_id,
+                mention_count=1,
+                drop_count=0,
+                npc_sources=[npc_id]
+            )
+            db.add(freq)
+        else:
+            freq.mention_count += 1
+            if npc_id not in (freq.npc_sources or []):
+                sources = list(freq.npc_sources or [])
+                sources.append(npc_id)
+                freq.npc_sources = sources
+    db.flush()
+
     # 키워드 드랍 확률 계산
     if random.random() < npc.drop_rate and npc.keyword_drops:
         keyword_id = random.choice(npc.keyword_drops)
@@ -144,28 +268,51 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
                 season_id=season.id,
                 keyword_id=keyword_id
             ))
+
+        # 드랍 카운트 업데이트
+        freq = db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == season.id,
+            KeywordFrequency.keyword_id == keyword_id
+        ).first()
+        if freq:
+            freq.drop_count += 1
+        db.flush()
+
+        # 히든 키워드 해금 체크
+        unlocked = _check_hidden_unlocks(season.id, keyword_id, npc_id, db)
         db.commit()
 
-        return {"status": "success", "data": {
+        result = {
             "success": True,
             "message": f"{npc.name}: {npc.dialogue}",
             "keyword_id": keyword_id,
             "keyword_name": keyword.name if keyword else None,
             "keyword_rarity": keyword.rarity if keyword else None,
             "warning": warning
-        }}
+        }
+        if unlocked:
+            result["hidden_unlocked"] = unlocked
 
-    return {"status": "success", "data": {
+        return {"status": "success", "data": result}
+
+    # 히든 키워드 체크 (드랍 없어도 NPC 대화로 해금 가능)
+    unlocked = _check_hidden_unlocks(season.id, None, npc_id, db)
+    db.commit()
+
+    result = {
         "success": True,
         "message": f"{npc.name}: {npc.dialogue}",
         "keyword_id": None,
         "keyword_name": None,
         "warning": warning
-    }}
+    }
+    if unlocked:
+        result["hidden_unlocked"] = unlocked
+
+    return {"status": "success", "data": result}
 
 
 def _handle_scan(season: Season, warning, db: Session):
-    # 스캔: 랜덤 키워드 낮은 확률로 획득
     if random.random() < 0.4:
         keyword = db.query(Keyword).filter(
             Keyword.rarity == "COMMON"
@@ -184,6 +331,8 @@ def _handle_scan(season: Season, warning, db: Session):
                     season_id=season.id,
                     keyword_id=keyword.id
                 ))
+
+            _update_frequency(season.id, keyword.id, None, db)
             db.commit()
 
             return {"status": "success", "data": {
@@ -211,7 +360,29 @@ def _handle_eavesdrop(npc_id: int, season: Season, warning, db: Session):
             "warning": warning
         }}
 
-    # 도청: 높은 확률로 RARE 이상 키워드 획득
+    # 도청도 mention_count 증가
+    for kw_id in (npc.keyword_drops or []):
+        freq = db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == season.id,
+            KeywordFrequency.keyword_id == kw_id
+        ).first()
+        if not freq:
+            freq = KeywordFrequency(
+                season_id=season.id,
+                keyword_id=kw_id,
+                mention_count=1,
+                drop_count=0,
+                npc_sources=[npc_id]
+            )
+            db.add(freq)
+        else:
+            freq.mention_count += 1
+            if npc_id not in (freq.npc_sources or []):
+                sources = list(freq.npc_sources or [])
+                sources.append(npc_id)
+                freq.npc_sources = sources
+    db.flush()
+
     if random.random() < 0.8 and npc.keyword_drops:
         keyword_id = random.choice(npc.keyword_drops)
         keyword = db.query(Keyword).filter(Keyword.id == keyword_id).first()
@@ -228,22 +399,43 @@ def _handle_eavesdrop(npc_id: int, season: Season, warning, db: Session):
                 season_id=season.id,
                 keyword_id=keyword_id
             ))
+
+        # 드랍 카운트
+        freq = db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == season.id,
+            KeywordFrequency.keyword_id == keyword_id
+        ).first()
+        if freq:
+            freq.drop_count += 1
+
+        unlocked = _check_hidden_unlocks(season.id, keyword_id, npc_id, db)
         db.commit()
 
-        return {"status": "success", "data": {
+        result = {
             "success": True,
             "message": f"도청 성공! 대화 내용을 엿들었습니다.",
             "keyword_id": keyword_id,
             "keyword_name": keyword.name if keyword else None,
             "keyword_rarity": keyword.rarity if keyword else None,
             "warning": warning
-        }}
+        }
+        if unlocked:
+            result["hidden_unlocked"] = unlocked
 
-    return {"status": "success", "data": {
+        return {"status": "success", "data": result}
+
+    unlocked = _check_hidden_unlocks(season.id, None, npc_id, db)
+    db.commit()
+
+    result = {
         "success": False,
         "message": "도청에 실패했습니다",
         "warning": warning
-    }}
+    }
+    if unlocked:
+        result["hidden_unlocked"] = unlocked
+
+    return {"status": "success", "data": result}
 
 
 # ── GET /explore/events/{day}  이벤트 조회 ──────────────
@@ -261,7 +453,6 @@ def get_events(day: int, db: Session = Depends(get_db)):
     ).all()
 
     triggered = [e for e in random_events if random.random() < e.trigger_prob]
-
     all_events = fixed + triggered
 
     return {
@@ -300,6 +491,65 @@ def get_inventory(db: Session = Depends(get_db)):
     return {"status": "success", "data": result}
 
 
+# ── GET /explore/frequency  키워드 빈도수 조회 ──────────
+@router.get("/frequency")
+def get_frequency(db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    if not season:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "NO_ACTIVE_SEASON",
+            "message": "진행 중인 시즌이 없습니다"
+        })
+
+    freqs = db.query(KeywordFrequency).filter(
+        KeywordFrequency.season_id == season.id
+    ).order_by(KeywordFrequency.mention_count.desc()).all()
+
+    result = []
+    for f in freqs:
+        keyword = db.query(Keyword).filter(Keyword.id == f.keyword_id).first()
+        if not keyword:
+            continue
+
+        # 열기 레벨 판정
+        npc_count = len(f.npc_sources or [])
+        if npc_count >= 3 or f.mention_count >= 5:
+            heat = "HOT"
+        elif npc_count >= 2 or f.mention_count >= 3:
+            heat = "WARM"
+        else:
+            heat = "COLD"
+
+        result.append({
+            "keyword_id": f.keyword_id,
+            "keyword_name": keyword.name,
+            "mention_count": f.mention_count,
+            "drop_count": f.drop_count,
+            "npc_count": npc_count,
+            "heat_level": heat
+        })
+
+    return {"status": "success", "data": result}
+
+
+# ── GET /explore/hidden  히든 키워드 힌트 조회 ──────────
+@router.get("/hidden")
+def get_hidden_hints(db: Session = Depends(get_db)):
+    hiddens = db.query(HiddenKeyword).all()
+    result = []
+    for h in hiddens:
+        keyword = db.query(Keyword).filter(Keyword.id == h.keyword_id).first()
+        result.append({
+            "id": h.id,
+            "hint_text": h.hint_text,
+            "unlock_type": h.unlock_type,
+            "is_unlocked": h.is_unlocked,
+            "keyword_name": keyword.name if (h.is_unlocked and keyword) else "???"
+        })
+    return {"status": "success", "data": result}
+
+
 # ── POST /explore/day-end  일차 종료 ────────────────────
 @router.post("/day-end")
 def end_day(db: Session = Depends(get_db)):
@@ -314,7 +564,6 @@ def end_day(db: Session = Depends(get_db)):
     completed_day = season.current_day
 
     if season.current_day >= 7:
-        # 7일 완료 → 제작 파트로 전환
         season.phase = "CRAFT"
         season.status = "FINISHED"
         db.commit()
@@ -329,12 +578,10 @@ def end_day(db: Session = Depends(get_db)):
             ).dict()
         }
 
-    # 다음 날로
     season.current_day += 1
-    season.current_time = 8  # 시간 리셋
+    season.current_time = 8
     db.commit()
 
-    # 내일 이벤트 미리보기
     tomorrow_events = db.query(Event).filter(
         Event.event_type == "FIXED",
         Event.trigger_day == season.current_day,

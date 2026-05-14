@@ -1,0 +1,37 @@
+[
+    {
+        "keyword_id": 5,
+        "unlock_type": "NPC_COMBO",
+        "unlock_condition": {"required_npcs": [19, 24]},
+        "hint_text": "전설의 존재를 아는 자들과 모두 대화하라...",
+        "is_unlocked": false
+    },
+    {
+        "keyword_id": 10,
+        "unlock_type": "NPC_COMBO",
+        "unlock_condition": {"required_npcs": [16, 19]},
+        "hint_text": "사막의 불꽃을 기억하는 자를 찾아라...",
+        "is_unlocked": false
+    },
+    {
+        "keyword_id": 30,
+        "unlock_type": "FREQUENCY",
+        "unlock_condition": {"target_keyword_id": 4, "threshold": 5},
+        "hint_text": "마나의 속삭임을 5번 이상 들은 자에게 전설이 열린다...",
+        "is_unlocked": false
+    },
+    {
+        "keyword_id": 9,
+        "unlock_type": "NPC_COMBO",
+        "unlock_condition": {"required_npcs": [6, 10, 14]},
+        "hint_text": "숲과 동굴의 빛을 아는 세 존재를 만나라...",
+        "is_unlocked": false
+    },
+    {
+        "keyword_id": 3,
+        "unlock_type": "FREQUENCY",
+        "unlock_condition": {"target_keyword_id": 3, "threshold": 4},
+        "hint_text": "강철의 울림이 4번 이상 메아리치면 비밀이 드러난다...",
+        "is_unlocked": false
+    }
+]
