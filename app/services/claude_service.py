@@ -192,3 +192,243 @@ JSON 형식으로만 응답하세요."""
             raise RuntimeError(f"분석 응답에 {field} 누락")
 
     return parsed
+
+# ══════════════════════════════════════════════════════════
+#  시즌 트렌드 시스템 (3번 -- 탐험 시즌, 사전 생성용)
+# ══════════════════════════════════════════════════════════
+
+def _parse_claude_json(raw_text: str, required: list[str], context: str) -> dict:
+    """
+    Claude 응답에서 마크다운 펜스를 제거하고 JSON을 파싱.검증한다.
+    generate_item_metadata / analyze_sales_performance의 펜스 제거 로직과 동일.
+    """
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Claude 응답 JSON 파싱 실패({context}). 원문: {text[:300]}"
+        ) from e
+
+    for field in required:
+        if field not in parsed:
+            raise RuntimeError(
+                f"Claude 응답에 {field} 누락({context}). 원문: {text[:300]}"
+            )
+    return parsed
+
+
+# ── 시즌 트렌드 생성 ────────────────────────────────────
+SEASON_TREND_SYSTEM_PROMPT = """당신은 '판타지 마을의 트렌드를 결정하는 시대정신'입니다.
+매 시즌, 이 판타지 마을에 어떤 감성이 유행할지를 정합니다.
+
+# 세계관
+- 인간/엘프/드워프/고블린이 사는 시골 마을. 현대 MZ 트렌드가 판타지에 섞인 세계관.
+
+# 규칙
+- trend_theme: 이번 시즌 유행을 한 문장으로. 한국어 40자 이내. 위트있고 구체적으로.
+- rising_keyword_ids: 제공된 키워드 목록 중 이번 시즌 '급상승'하는 키워드 정확히 3개의 id.
+  * 서로 다른 category(BASE/STYLE/CONCEPT)가 섞이도록 고를 것.
+  * trend_theme과 의미가 통하는 키워드를 고를 것.
+- 매 시즌 다른 조합이 나오도록 다양하게 선택할 것.
+
+# 출력 형식 (오직 JSON만 출력, 마크다운 ``` 절대 금지)
+{"trend_theme": "...", "rising_keyword_ids": [12, 5, 23]}
+"""
+
+
+def generate_season_trend(keywords: list[dict]) -> dict:
+    """
+    이번 시즌의 트렌드 테마와 급상승 키워드를 결정한다 (사전 생성용).
+
+    Args:
+        keywords: [{"id": int, "name": str, "category": str, "description": str}, ...]
+
+    Returns:
+        {"trend_theme": str, "rising_keyword_ids": list[int]}
+
+    Raises:
+        RuntimeError: Claude 호출 실패 또는 응답 파싱.검증 실패 시
+    """
+    keyword_lines = "\n".join(
+        f"- id={k['id']} [{k['category']}] {k['name']}: {k['description']}"
+        for k in keywords
+    )
+
+    user_message = f"""아래 키워드 목록을 보고 이번 시즌의 트렌드를 정해주세요.
+
+# 전체 키워드 목록
+{keyword_lines}
+
+JSON 형식으로만 응답하세요."""
+
+    try:
+        response = _client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=300,
+            system=SEASON_TREND_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}]
+        )
+    except APIError as e:
+        raise RuntimeError(f"Claude API 호출 실패(시즌 트렌드): {e}") from e
+
+    parsed = _parse_claude_json(
+        response.content[0].text,
+        required=["trend_theme", "rising_keyword_ids"],
+        context="시즌 트렌드"
+    )
+
+    # rising_keyword_ids 검증: 실재하는 키워드 id만 남긴다 (환각 방어)
+    rising = parsed["rising_keyword_ids"]
+    if not isinstance(rising, list) or not rising:
+        raise RuntimeError(f"rising_keyword_ids가 비정상입니다: {rising}")
+
+    valid_ids = {k["id"] for k in keywords}
+    rising = [int(kid) for kid in rising if int(kid) in valid_ids]
+    if not rising:
+        raise RuntimeError("rising_keyword_ids에 유효한 키워드 id가 없습니다")
+
+    return {
+        "trend_theme": str(parsed["trend_theme"]),
+        "rising_keyword_ids": rising,
+    }
+
+
+# ── 시즌 NPC 정보 생성 ──────────────────────────────────
+SEASON_NPC_SYSTEM_PROMPT = """당신은 '판타지 마을 주민들의 입소문을 설계하는 연출가'입니다.
+이번 시즌 트렌드가 정해졌을 때, 마을 NPC들이 플레이어에게 어떤 말을 흘릴지 설계합니다.
+
+# 핵심 개념: 신뢰도
+- 각 NPC는 true_reliability(0~100)를 가집니다. 높을수록 정확한 정보를 줍니다.
+- 신뢰도 높음(70 이상): 실제 급상승 키워드를 정확히 언급. is_disinformer=false.
+- 신뢰도 낮음(40 이하): 급상승이 '아닌' 엉뚱한 키워드를 유행이라 잘못 말함. is_disinformer=true.
+- 중간(41~69): 급상승 키워드와 평범한 키워드를 섞어 언급. is_disinformer=false.
+- 전체 NPC 중 약 30%는 신뢰도 낮은 거짓 정보원(is_disinformer=true)으로 배치할 것.
+
+# 규칙
+- season_dialogue: NPC가 플레이어에게 건네는 대사. 한국어 30~60자. NPC 성격이 드러나게.
+  * 신뢰도 높은 NPC는 자신감 있고 구체적으로, 낮은 NPC는 모호하거나 허세 섞인 말투로.
+- assigned_keywords: NPC가 이번 시즌 플레이어에게 줄(드랍할) keyword_id 2~3개.
+  * is_disinformer=false면 급상승 키워드 위주로 배정.
+  * is_disinformer=true면 급상승이 '아닌' 키워드 위주로 배정.
+- 모든 NPC의 대사는 서로 다르게, 같은 트렌드라도 다양한 표현으로 작성할 것.
+- 요청된 모든 npc_id에 대해 빠짐없이 생성할 것.
+
+# 출력 형식 (오직 JSON만 출력, 마크다운 ``` 절대 금지)
+{"npcs": [{"npc_id": 1, "season_dialogue": "...", "assigned_keywords": [3, 7], "true_reliability": 80, "is_disinformer": false}]}
+"""
+
+
+def generate_npc_season_info(
+    trend_theme: str,
+    rising_keywords: list[dict],
+    all_keywords: list[dict],
+    npcs: list[dict],
+) -> list[dict]:
+    """
+    이번 시즌 NPC들의 대사/배정 키워드/신뢰도를 생성한다 (사전 생성용).
+
+    Args:
+        trend_theme:     이번 시즌 트렌드 테마
+        rising_keywords: 급상승 키워드 [{"id", "name", "category"}, ...]
+        all_keywords:    전체 키워드 [{"id", "name", "category"}, ...]
+        npcs:            정보를 생성할 NPC [{"id", "name", "location"}, ...]
+
+    Returns:
+        [{"npc_id", "season_dialogue", "assigned_keywords",
+          "true_reliability", "is_disinformer"}, ...]
+
+    Raises:
+        RuntimeError: Claude 호출 실패, 파싱 실패, 또는 요청 NPC 누락 시
+    """
+    rising_lines = "\n".join(
+        f"- id={k['id']} [{k['category']}] {k['name']}" for k in rising_keywords
+    )
+    all_lines = "\n".join(
+        f"- id={k['id']} [{k['category']}] {k['name']}" for k in all_keywords
+    )
+    npc_lines = "\n".join(
+        f"- npc_id={n['id']} {n['name']} (위치: {n['location']})" for n in npcs
+    )
+
+    user_message = f"""이번 시즌 트렌드에 맞춰 아래 NPC들의 입소문을 설계해주세요.
+
+# 이번 시즌 트렌드
+{trend_theme}
+
+# 급상승 키워드 (진짜 유행)
+{rising_lines}
+
+# 전체 키워드 목록 (assigned_keywords는 이 안에서만 선택)
+{all_lines}
+
+# 정보를 생성할 NPC ({len(npcs)}명)
+{npc_lines}
+
+위 {len(npcs)}명 전원에 대해 JSON 형식으로만 응답하세요."""
+
+    try:
+        response = _client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=5000,
+            system=SEASON_NPC_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}]
+        )
+    except APIError as e:
+        raise RuntimeError(f"Claude API 호출 실패(NPC 시즌 정보): {e}") from e
+
+    parsed = _parse_claude_json(
+        response.content[0].text,
+        required=["npcs"],
+        context="NPC 시즌 정보"
+    )
+
+    npc_list = parsed["npcs"]
+    if not isinstance(npc_list, list) or not npc_list:
+        raise RuntimeError(f"npcs가 비정상입니다: {npc_list}")
+
+    valid_keyword_ids = {k["id"] for k in all_keywords}
+    requested_npc_ids = {n["id"] for n in npcs}
+
+    result = []
+    for item in npc_list:
+        for field in ["npc_id", "season_dialogue", "assigned_keywords",
+                      "true_reliability", "is_disinformer"]:
+            if field not in item:
+                raise RuntimeError(f"NPC 항목에 {field} 누락: {item}")
+
+        npc_id = int(item["npc_id"])
+        if npc_id not in requested_npc_ids:
+            # 요청하지 않은 npc_id는 무시 (환각 방어)
+            continue
+
+        # assigned_keywords: 실재하는 keyword_id만 남긴다
+        assigned = [
+            int(kid) for kid in item["assigned_keywords"]
+            if int(kid) in valid_keyword_ids
+        ]
+
+        # true_reliability: 0~100 범위로 클램프
+        reliability = max(0, min(100, int(item["true_reliability"])))
+
+        result.append({
+            "npc_id": npc_id,
+            "season_dialogue": str(item["season_dialogue"]),
+            "assigned_keywords": assigned,
+            "true_reliability": reliability,
+            "is_disinformer": bool(item["is_disinformer"]),
+        })
+
+    # 요청한 NPC가 응답에서 빠졌는지 확인
+    returned_ids = {r["npc_id"] for r in result}
+    missing = requested_npc_ids - returned_ids
+    if missing:
+        raise RuntimeError(f"응답에서 NPC {sorted(missing)} 누락")
+
+    return result

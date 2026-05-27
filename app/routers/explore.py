@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.explore import Season, NPC, Event, PlayerInventory
+from app.models.explore import Season, NPC, Event, PlayerInventory, SeasonNPCInfo
 from app.models.keyword import Keyword
 from app.models.frequency import KeywordFrequency, HiddenKeyword
 from app.schemas.explore import (
@@ -155,10 +155,33 @@ def get_npcs(location: str | None = None, db: Session = Depends(get_db)):
     if location:
         query = query.filter(NPC.location == location)
     npcs = query.all()
-    return {
-        "status": "success",
-        "data": [NPCListItem.from_orm(n).dict() for n in npcs]
-    }
+
+    # 현재 활성 시즌의 NPC 인스턴스를 한 번에 조회 (N+1 방지)
+    season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    info_map = {}
+    if season:
+        infos = db.query(SeasonNPCInfo).filter(
+            SeasonNPCInfo.season_id == season.id
+        ).all()
+        info_map = {info.npc_id: info for info in infos}
+
+    result = []
+    for n in npcs:
+        info = info_map.get(n.id)
+        result.append(NPCListItem(
+            id=n.id,
+            name=n.name,
+            location=n.location,
+            is_active=n.is_active,
+            portrait_id=n.portrait_id,
+            # 시즌 인스턴스가 있으면 그 대사, 없으면 기존 고정 대사로 폴백
+            season_dialogue=(info.season_dialogue if info else n.dialogue) or "",
+            # 인스턴스 없으면 미파악(None)
+            perceived_reliability=(info.perceived_reliability if info else None),
+            talked=(info.talked if info else False),
+        ).dict())
+
+    return {"status": "success", "data": result}
 
 
 # ── POST /explore/action  행동 처리 ─────────────────────
