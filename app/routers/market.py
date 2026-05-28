@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.market import MarketItem, Settlement
 from app.models.keyword import Keyword
+from app.models.explore import Season
 from app.schemas.market import (
     MarketItemCreate, MarketItemResponse,
     SellRequest, SellResponse,
@@ -100,10 +101,12 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
         item.status = "SOLD_OUT"
     db.commit()
 
-    settlement = db.query(Settlement).filter(Settlement.season_id == 1).first()
+    active_season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    active_season_id = active_season.id if active_season else 1
+    settlement = db.query(Settlement).filter(Settlement.season_id == active_season_id).first()
     if not settlement:
         settlement = Settlement(
-            season_id=1,
+            season_id=active_season_id,
             total_revenue=revenue,
             material_cost=0,
             rent_cost=500,
@@ -226,7 +229,9 @@ def analyze_item(item_id: int, db: Session = Depends(get_db)):
     days_on_market = max(0, item.current_day - item.release_day)
 
     # 매출 계산 (정산 테이블에서)
-    settlement = db.query(Settlement).filter(Settlement.season_id == 1).first()
+    active_season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    active_season_id = active_season.id if active_season else 1
+    settlement = db.query(Settlement).filter(Settlement.season_id == active_season_id).first()
     revenue = settlement.total_revenue if settlement else 0
 
     # 서버 자체 분석 (Claude 호출 없이 빠르게 제공)

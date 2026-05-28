@@ -183,7 +183,7 @@ def get_status(db: Session = Depends(get_db)):
 
     warning = None
     if season.current_time >= 22:
-        warning = "⚠️ 22시 이후! 보안관이 활성화됩니다. 귀가하세요!"
+        warning = "[!] 22시 이후! 보안관이 활성화됩니다. 귀가하세요!"
 
     return {
         "status": "success",
@@ -267,7 +267,7 @@ def do_action(body: ActionRequest, db: Session = Depends(get_db)):
 
     warning = None
     if season.current_time >= 21:
-        warning = "⚠️ 곧 22시입니다! 서둘러 귀가하세요!"
+        warning = "[!] 곧 22시입니다! 서둘러 귀가하세요!"
 
     # 행동 처리
     if body.action_type == "TALK":
@@ -326,7 +326,7 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
     db.flush()
 
     # 키워드 드랍 확률 계산
-    if random.random() < npc.drop_rate and keyword_pool:
+    if keyword_pool:
         keyword_id = random.choice(keyword_pool)
         keyword = db.query(Keyword).filter(Keyword.id == keyword_id).first()
 
@@ -710,34 +710,4 @@ def end_day(db: Session = Depends(get_db)):
             phase_changed=False,
             message=f"Day {completed_day} 완료! Day {season.current_day} 시작."
         ).dict()
-    }
-
-    # ── POST /explore/npcs/{npc_id}/talk  NPC 대화 (Unity NPCServerManager 전용) ──
-@router.post("/npcs/{npc_id}/talk")
-def talk_to_npc(npc_id: int, db: Session = Depends(get_db)):
-    """
-    NPC 대화 전용 엔드포인트. Unity NPCServerManager.TalkToNpc()가 호출한다.
-    """
-    from app.schemas.explore import ActionRequest
-    
-    # 1. 내부적으로 기존 do_action의 TALK 흐름을 그대로 탑니다.
-    inner = do_action(ActionRequest(action_type="TALK", target_id=npc_id), db)
-    data = inner["data"]
-
-    # 2. 유니티가 기대하는 응답 구조(keyword_type 포함)로 변환해서 내려줍니다.
-    granted = None
-    if data.get("keyword_id"):
-        kw = db.query(Keyword).filter(Keyword.id == data["keyword_id"]).first()
-        granted = {
-            "id": data["keyword_id"],
-            "name": data.get("keyword_name"),
-            "keyword_type": kw.category if kw else "",
-        }
-
-    return {
-        "status": "success",
-        "data": {
-            "talked": bool(data.get("success", False)),
-            "granted_keyword": granted,
-        }
     }
