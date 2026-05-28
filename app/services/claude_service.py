@@ -432,3 +432,109 @@ def generate_npc_season_info(
         raise RuntimeError(f"응답에서 NPC {sorted(missing)} 누락")
 
     return result
+
+    # ══════════════════════════════════════════════════════════
+#  시즌 트렌드 일괄 생성 (3-3 개선 -- 시즌 간 다양성 확보)
+#  claude_service.py 맨 끝에 이어붙일 것.
+#  기존 generate_season_trend()는 더 이상 쓰이지 않음 (지워도 무방).
+# ══════════════════════════════════════════════════════════
+
+ALL_SEASON_TRENDS_SYSTEM_PROMPT = """당신은 '판타지 마을의 여러 시즌에 걸친 트렌드 흐름을 설계하는 시대정신'입니다.
+여러 시즌의 트렌드를 한 번에 설계합니다. 핵심은 '시즌마다 확연히 다른 트렌드'입니다.
+
+# 세계관
+- 인간/엘프/드워프/고블린이 사는 시골 마을. 현대 MZ 트렌드가 판타지에 섞인 세계관.
+
+# 가장 중요한 규칙: 시즌 간 다양성
+- 각 시즌의 트렌드는 서로 확연히 달라야 합니다. 컨셉/분위기/색감이 겹치면 안 됩니다.
+- rising_keyword_ids는 시즌 간 최대한 겹치지 않게, 제공된 키워드 전체를 골고루 활용하세요.
+  특정 키워드가 여러 시즌에 반복 등장하지 않도록 분산할 것.
+- 서로 다른 방향으로 폭넓게 펼칠 것. 예: 한 시즌이 '어두운/신비'면
+  다른 시즌은 '밝은/활기', 또 다른 시즌은 '빈티지/클래식', '귀여운/아기자기',
+  '강렬한/화려한' 등 전혀 다른 결로 갈 것.
+
+# 각 시즌 규칙
+- trend_theme: 그 시즌 유행을 한 문장으로. 한국어 40자 이내. 위트있고 구체적으로.
+- rising_keyword_ids: 그 시즌 급상승 키워드 정확히 3개의 id.
+  서로 다른 category(BASE/STYLE/CONCEPT)가 섞이도록 고를 것.
+
+# 출력 형식 (오직 JSON만 출력, 마크다운 ``` 절대 금지)
+{"seasons": [{"trend_theme": "...", "rising_keyword_ids": [12, 5, 23]}, {"trend_theme": "...", "rising_keyword_ids": [3, 18, 27]}]}
+"""
+
+
+def generate_all_season_trends(keywords: list[dict], count: int) -> list[dict]:
+    """
+    count개 시즌의 트렌드를 한 번의 호출로 생성한다 (시즌 간 다양성 확보).
+
+    시즌별로 따로 호출하면 각 호출이 서로를 몰라 비슷한 트렌드로 수렴하므로,
+    한 컨텍스트에 묶어 Claude가 시즌 간 중복을 직접 통제하게 한다.
+
+    Args:
+        keywords: [{"id", "name", "category", "description"}, ...]
+        count:    생성할 시즌 개수
+
+    Returns:
+        [{"trend_theme": str, "rising_keyword_ids": list[int]}, ...]  (count개)
+
+    Raises:
+        RuntimeError: Claude 호출 실패, 파싱 실패, 또는 개수 부족 시
+    """
+    if count < 1:
+        return []
+
+    keyword_lines = "\n".join(
+        f"- id={k['id']} [{k['category']}] {k['name']}: {k['description']}"
+        for k in keywords
+    )
+
+    user_message = f"""아래 키워드 목록을 보고 서로 확연히 다른 {count}개 시즌의 트렌드를 설계해주세요.
+
+# 전체 키워드 목록
+{keyword_lines}
+
+정확히 {count}개 시즌을 JSON 형식으로만 응답하세요."""
+
+    try:
+        response = _client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=2000,
+            system=ALL_SEASON_TRENDS_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}]
+        )
+    except APIError as e:
+        raise RuntimeError(f"Claude API 호출 실패(시즌 트렌드 일괄): {e}") from e
+
+    parsed = _parse_claude_json(
+        response.content[0].text,
+        required=["seasons"],
+        context="시즌 트렌드 일괄"
+    )
+
+    seasons = parsed["seasons"]
+    if not isinstance(seasons, list) or len(seasons) < count:
+        got = len(seasons) if isinstance(seasons, list) else seasons
+        raise RuntimeError(f"요청한 {count}개보다 적은 시즌이 생성됨: {got}")
+
+    valid_ids = {k["id"] for k in keywords}
+    result = []
+    for idx, s in enumerate(seasons[:count]):
+        if "trend_theme" not in s or "rising_keyword_ids" not in s:
+            raise RuntimeError(f"{idx + 1}번째 시즌에 필수 필드 누락: {s}")
+
+        # 실재하는 키워드 id만 통과 (환각 방어)
+        rising = [
+            int(kid) for kid in s["rising_keyword_ids"]
+            if int(kid) in valid_ids
+        ]
+        if not rising:
+            raise RuntimeError(
+                f"{idx + 1}번째 시즌에 유효한 rising_keyword_ids가 없습니다: {s}"
+            )
+
+        result.append({
+            "trend_theme": str(s["trend_theme"]),
+            "rising_keyword_ids": rising,
+        })
+
+    return result

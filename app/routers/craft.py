@@ -149,7 +149,7 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
 
         item_name = ai_result["name"]
         item_description = ai_result["description"]
-        image_url = None  # Pollinations 동기 호출은 너무 느려서 fallback에선 생성 안 함
+        image_url = "/static/items/placeholder.png" # 단계 1: 사전생성 캐시 미스시 placeholder
 
         # 다음 동일 요청에서 Claude 재호출 안 하도록 캐시에 저장
         new_cache = GeneratedItemCache(

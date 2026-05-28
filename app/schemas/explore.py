@@ -7,7 +7,8 @@ class SeasonStatus(BaseModel):
     current_time: int
     phase:        str
     status:       str
-
+    trend_theme:  str = ""
+    
     class Config:
         from_attributes = True
 

@@ -101,9 +101,41 @@ def _check_hidden_unlocks(season_id: int, keyword_id: int, npc_id: int | None, d
     return unlocked_items
 
 
+# ── 시즌 NPC 데이터 헬퍼 (3-4) ──────────────────────────
+def _get_npc_season_data(season_id: int, npc: NPC, db: Session) -> dict:
+    """
+    이번 시즌의 NPC 데이터를 반환한다.
+
+    SeasonNPCInfo(사전 생성된 시즌 정보)가 있으면 그 시즌의
+    키워드 풀/대사를 쓰고, 없으면 NPC 마스터의 폴백 값을 쓴다.
+    -> 시즌 시스템이 준비되기 전에도 게임이 깨지지 않는다.
+
+    Returns:
+        {"keyword_pool": list[int], "dialogue": str,
+         "info": SeasonNPCInfo | None}
+    """
+    info = db.query(SeasonNPCInfo).filter(
+        SeasonNPCInfo.season_id == season_id,
+        SeasonNPCInfo.npc_id == npc.id
+    ).first()
+
+    if info:
+        return {
+            "keyword_pool": list(info.assigned_keywords or []),
+            "dialogue": info.season_dialogue or npc.dialogue or "",
+            "info": info,
+        }
+    return {
+        "keyword_pool": list(npc.keyword_drops or []),
+        "dialogue": npc.dialogue or "",
+        "info": None,
+    }
+
+
 # ── POST /explore/start  시즌 시작 ──────────────────────
 @router.post("/start")
 def start_season(db: Session = Depends(get_db)):
+    # 이미 진행 중인 시즌이 있으면 그대로 반환
     existing = db.query(Season).filter(Season.status == "ACTIVE").first()
     if existing:
         return {
@@ -112,15 +144,29 @@ def start_season(db: Session = Depends(get_db)):
             "message": "이미 진행 중인 시즌이 있습니다"
         }
 
-    season = Season(current_day=1, current_time=8, phase="EXPLORE", status="ACTIVE")
-    db.add(season)
+    # 사전 생성된 PENDING 시즌 중 가장 낮은 id를 ACTIVE로 전환
+    season = db.query(Season).filter(
+        Season.status == "PENDING"
+    ).order_by(Season.id.asc()).first()
+
+    if not season:
+        raise HTTPException(status_code=409, detail={
+            "status": "error",
+            "error_code": "NO_PENDING_SEASON",
+            "message": "사전 생성된 시즌이 없습니다. seeds/pregenerate_seasons.py 를 실행하세요"
+        })
+
+    season.status = "ACTIVE"
+    season.current_day = 1
+    season.current_time = 8
+    season.phase = "EXPLORE"
     db.commit()
     db.refresh(season)
 
     return {
         "status": "success",
         "data": SeasonStatus.from_orm(season).dict(),
-        "message": "시즌 1일차 탐험 시작!"
+        "message": "시즌 탐험 시작!"
     }
 
 
@@ -156,7 +202,6 @@ def get_npcs(location: str | None = None, db: Session = Depends(get_db)):
         query = query.filter(NPC.location == location)
     npcs = query.all()
 
-    # 현재 활성 시즌의 NPC 인스턴스를 한 번에 조회 (N+1 방지)
     season = db.query(Season).filter(Season.status == "ACTIVE").first()
     info_map = {}
     if season:
@@ -174,9 +219,7 @@ def get_npcs(location: str | None = None, db: Session = Depends(get_db)):
             location=n.location,
             is_active=n.is_active,
             portrait_id=n.portrait_id,
-            # 시즌 인스턴스가 있으면 그 대사, 없으면 기존 고정 대사로 폴백
             season_dialogue=(info.season_dialogue if info else n.dialogue) or "",
-            # 인스턴스 없으면 미파악(None)
             perceived_reliability=(info.perceived_reliability if info else None),
             talked=(info.talked if info else False),
         ).dict())
@@ -250,8 +293,17 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
             "warning": warning
         }}
 
-    # NPC가 보유한 모든 키워드의 mention_count 증가 (대화하면 언급은 항상 발생)
-    for kw_id in (npc.keyword_drops or []):
+    # 이번 시즌 NPC 데이터 (SeasonNPCInfo 우선, 없으면 폴백)
+    sdata = _get_npc_season_data(season.id, npc, db)
+    keyword_pool = sdata["keyword_pool"]
+    dialogue = sdata["dialogue"]
+
+    # 이번 시즌 이 NPC와 대화했음을 기록
+    if sdata["info"] is not None and not sdata["info"].talked:
+        sdata["info"].talked = True
+
+    # NPC가 이번 시즌 언급하는 키워드의 mention_count 증가 (대화하면 언급은 항상 발생)
+    for kw_id in keyword_pool:
         freq = db.query(KeywordFrequency).filter(
             KeywordFrequency.season_id == season.id,
             KeywordFrequency.keyword_id == kw_id
@@ -274,8 +326,8 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
     db.flush()
 
     # 키워드 드랍 확률 계산
-    if random.random() < npc.drop_rate and npc.keyword_drops:
-        keyword_id = random.choice(npc.keyword_drops)
+    if random.random() < npc.drop_rate and keyword_pool:
+        keyword_id = random.choice(keyword_pool)
         keyword = db.query(Keyword).filter(Keyword.id == keyword_id).first()
 
         # 인벤토리에 추가
@@ -307,7 +359,7 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
 
         result = {
             "success": True,
-            "message": f"{npc.name}: {npc.dialogue}",
+            "message": f"{npc.name}: {dialogue}",
             "keyword_id": keyword_id,
             "keyword_name": keyword.name if keyword else None,
             "keyword_rarity": keyword.rarity if keyword else None,
@@ -324,7 +376,7 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
 
     result = {
         "success": True,
-        "message": f"{npc.name}: {npc.dialogue}",
+        "message": f"{npc.name}: {dialogue}",
         "keyword_id": None,
         "keyword_name": None,
         "warning": warning
@@ -383,8 +435,12 @@ def _handle_eavesdrop(npc_id: int, season: Season, warning, db: Session):
             "warning": warning
         }}
 
+    # 이번 시즌 NPC 데이터 (SeasonNPCInfo 우선, 없으면 폴백)
+    sdata = _get_npc_season_data(season.id, npc, db)
+    keyword_pool = sdata["keyword_pool"]
+
     # 도청도 mention_count 증가
-    for kw_id in (npc.keyword_drops or []):
+    for kw_id in keyword_pool:
         freq = db.query(KeywordFrequency).filter(
             KeywordFrequency.season_id == season.id,
             KeywordFrequency.keyword_id == kw_id
@@ -406,8 +462,8 @@ def _handle_eavesdrop(npc_id: int, season: Season, warning, db: Session):
                 freq.npc_sources = sources
     db.flush()
 
-    if random.random() < 0.8 and npc.keyword_drops:
-        keyword_id = random.choice(npc.keyword_drops)
+    if random.random() < 0.8 and keyword_pool:
+        keyword_id = random.choice(keyword_pool)
         keyword = db.query(Keyword).filter(Keyword.id == keyword_id).first()
 
         existing = db.query(PlayerInventory).filter(
@@ -459,6 +515,40 @@ def _handle_eavesdrop(npc_id: int, season: Season, warning, db: Session):
         result["hidden_unlocked"] = unlocked
 
     return {"status": "success", "data": result}
+
+
+# ── POST /explore/npcs/{npc_id}/talk  NPC 대화 (Unity NPCServerManager 전용) ──
+@router.post("/npcs/{npc_id}/talk")
+def talk_to_npc(npc_id: int, db: Session = Depends(get_db)):
+    """
+    NPC 대화 전용 엔드포인트. Unity NPCServerManager.TalkToNpc()가 호출한다.
+
+    내부적으로 do_action의 TALK 흐름(시즌 확인 / 22시 체크 / 시간 소모 /
+    _handle_talk)을 그대로 재사용하고, 응답만 Unity 모델(ServerNpcTalkResponse)에
+    맞춰 {talked, granted_keyword} 형태로 변환한다.
+    """
+    inner = do_action(ActionRequest(action_type="TALK", target_id=npc_id), db)
+    data = inner["data"]
+
+    # 키워드가 드랍됐으면 granted_keyword 구성.
+    # keyword_type에는 category(BASE/STYLE/CONCEPT)를 넣는다.
+    # -> Unity AddKeywordFromServer가 Enum.TryParse(KeywordType)로 파싱한다.
+    granted = None
+    if data.get("keyword_id"):
+        kw = db.query(Keyword).filter(Keyword.id == data["keyword_id"]).first()
+        granted = {
+            "id": data["keyword_id"],
+            "name": data.get("keyword_name"),
+            "keyword_type": kw.category if kw else "",
+        }
+
+    return {
+        "status": "success",
+        "data": {
+            "talked": bool(data.get("success", False)),
+            "granted_keyword": granted,
+        }
+    }
 
 
 # ── GET /explore/events/{day}  이벤트 조회 ──────────────
@@ -620,4 +710,34 @@ def end_day(db: Session = Depends(get_db)):
             phase_changed=False,
             message=f"Day {completed_day} 완료! Day {season.current_day} 시작."
         ).dict()
+    }
+
+    # ── POST /explore/npcs/{npc_id}/talk  NPC 대화 (Unity NPCServerManager 전용) ──
+@router.post("/npcs/{npc_id}/talk")
+def talk_to_npc(npc_id: int, db: Session = Depends(get_db)):
+    """
+    NPC 대화 전용 엔드포인트. Unity NPCServerManager.TalkToNpc()가 호출한다.
+    """
+    from app.schemas.explore import ActionRequest
+    
+    # 1. 내부적으로 기존 do_action의 TALK 흐름을 그대로 탑니다.
+    inner = do_action(ActionRequest(action_type="TALK", target_id=npc_id), db)
+    data = inner["data"]
+
+    # 2. 유니티가 기대하는 응답 구조(keyword_type 포함)로 변환해서 내려줍니다.
+    granted = None
+    if data.get("keyword_id"):
+        kw = db.query(Keyword).filter(Keyword.id == data["keyword_id"]).first()
+        granted = {
+            "id": data["keyword_id"],
+            "name": data.get("keyword_name"),
+            "keyword_type": kw.category if kw else "",
+        }
+
+    return {
+        "status": "success",
+        "data": {
+            "talked": bool(data.get("success", False)),
+            "granted_keyword": granted,
+        }
     }

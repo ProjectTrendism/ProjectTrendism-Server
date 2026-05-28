@@ -5,3 +5,7 @@ __pycache__/
 *.db
 .DS_Store
 test_claude.py
+analyze_category_rule.py
+static/items.zip
+static/item
+ 
