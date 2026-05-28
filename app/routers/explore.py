@@ -135,13 +135,30 @@ def _get_npc_season_data(season_id: int, npc: NPC, db: Session) -> dict:
 # ── POST /explore/start  시즌 시작 ──────────────────────
 @router.post("/start")
 def start_season(db: Session = Depends(get_db)):
-    # 이미 진행 중인 시즌이 있으면 그대로 반환
+    # 이미 진행 중인 시즌이 있으면 초기화 후 재시작 (새 탐험 세션)
     existing = db.query(Season).filter(Season.status == "ACTIVE").first()
     if existing:
+        existing.current_day = 1
+        existing.current_time = 8
+        existing.phase = "EXPLORE"
+
+        db.query(PlayerInventory).filter(
+            PlayerInventory.season_id == existing.id
+        ).delete()
+
+        db.query(SeasonNPCInfo).filter(
+            SeasonNPCInfo.season_id == existing.id
+        ).update({"talked": False, "perceived_reliability": None})
+
+        db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == existing.id
+        ).delete()
+
+
         return {
             "status": "success",
             "data": SeasonStatus.from_orm(existing).dict(),
-            "message": "이미 진행 중인 시즌이 있습니다"
+            "message": "시즌 탐험 시작!"
         }
 
     # 사전 생성된 PENDING 시즌 중 가장 낮은 id를 ACTIVE로 전환
@@ -250,6 +267,10 @@ def do_action(body: ActionRequest, db: Session = Depends(get_db)):
                 item = random.choice(inventory)
                 inventory.remove(item)
                 db.delete(item)
+
+        # 체포 후 자동으로 다음 날로 이동 (영구 체포 루프 방지)
+        season.current_day += 1
+        season.current_time = 8
         db.commit()
 
         return {
@@ -257,7 +278,9 @@ def do_action(body: ActionRequest, db: Session = Depends(get_db)):
             "data": {
                 "success": False,
                 "message": f"보안관에게 체포됐습니다! 키워드 {seized_count}개를 압수당하고 강제 귀가합니다.",
-                "warning": "강제 귀가"
+                "warning": "강제 귀가",
+                "auto_day_end": True,
+                "next_day": season.current_day
             }
         }
 
@@ -301,6 +324,8 @@ def _handle_talk(npc_id: int, season: Season, warning, db: Session):
     # 이번 시즌 이 NPC와 대화했음을 기록
     if sdata["info"] is not None and not sdata["info"].talked:
         sdata["info"].talked = True
+        if sdata["info"].perceived_reliability is None:
+            sdata["info"].perceived_reliability = sdata["info"].true_reliability
 
     # NPC가 이번 시즌 언급하는 키워드의 mention_count 증가 (대화하면 언급은 항상 발생)
     for kw_id in keyword_pool:
@@ -710,4 +735,37 @@ def end_day(db: Session = Depends(get_db)):
             phase_changed=False,
             message=f"Day {completed_day} 완료! Day {season.current_day} 시작."
         ).dict()
+    }
+
+# ── POST /explore/dev-reset  테스트용 시즌 초기화 ──
+@router.post("/dev-reset")
+def dev_reset(db: Session = Depends(get_db)):
+    season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    if not season:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "NO_ACTIVE_SEASON",
+            "message": "진행 중인 시즌이 없습니다"
+        })
+
+    season.current_day = 1
+    season.current_time = 8
+    season.phase = "EXPLORE"
+
+    db.query(SeasonNPCInfo).filter(
+        SeasonNPCInfo.season_id == season.id
+    ).update({"talked": False, "perceived_reliability": None})
+
+    db.query(PlayerInventory).filter(
+        PlayerInventory.season_id == season.id
+    ).delete()
+
+    db.query(KeywordFrequency).filter(
+        KeywordFrequency.season_id == season.id
+    ).delete()
+
+
+    db.commit()
+
+        "message": "[DEV] 시즌 초기화 완료"
     }
