@@ -154,6 +154,8 @@ def start_season(db: Session = Depends(get_db)):
             KeywordFrequency.season_id == existing.id
         ).delete()
 
+        db.commit()
+        db.refresh(existing)
 
         return {
             "status": "success",
@@ -767,5 +769,7 @@ def dev_reset(db: Session = Depends(get_db)):
 
     db.commit()
 
+    return {
+        "status": "success",
         "message": "[DEV] 시즌 초기화 완료"
     }

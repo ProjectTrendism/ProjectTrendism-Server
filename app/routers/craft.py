@@ -12,8 +12,46 @@ from app.schemas.craft import (
 )
 from app.services.claude_service import generate_item_metadata
 import uuid
+import os
+import glob
+import hashlib
 
 router = APIRouter(prefix="/craft", tags=["Craft"])
+
+
+# ── 정적 이미지 폴백 ────────────────────────────────────
+# 사전 생성 이미지가 아직 없는 조합일 때, 기존에 생성된 이미지 중 하나를 재활용한다.
+# (placeholder.png 한 장만 계속 보여주는 것보다 시연 품질이 좋음)
+# main.py와 동일 규칙: 프로젝트 루트/static/items
+_STATIC_ITEMS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "static", "items"
+)
+_PLACEHOLDER_URL = "/static/items/placeholder.png"
+
+
+def _list_item_images(grade: str | None = None) -> list[str]:
+    """static/items 안의 사전 생성 아이템 이미지 파일명 목록.
+    grade가 주어지면 해당 등급(item_*_{grade}.png)만, 없으면 전체 item_*.png."""
+    try:
+        pattern = f"item_*_{grade}.png" if grade else "item_*.png"
+        files = [os.path.basename(p) for p in glob.glob(os.path.join(_STATIC_ITEMS_DIR, pattern))]
+        return sorted(files)
+    except Exception:
+        return []
+
+
+def _pick_fallback_image(cache_key: str, grade: str) -> str:
+    """이미지가 없을 때 기존 생성 이미지 중 하나를 '결정적으로' 골라 재활용.
+    - 같은 cache_key는 항상 같은 이미지를 반환 (세션마다 그림이 바뀌는 깜빡임 방지).
+    - 같은 등급 이미지를 우선 사용 -> 없으면 전체 아이템 이미지 -> 그것도 없으면 placeholder.
+    """
+    candidates = _list_item_images(grade) or _list_item_images(None)
+    if not candidates:
+        return _PLACEHOLDER_URL
+    # cache_key 기반 결정성 인덱스 (pregenerate._make_seed와 동일한 md5 방식, 비-salt)
+    idx = int(hashlib.md5(cache_key.encode("utf-8")).hexdigest()[:8], 16) % len(candidates)
+    return f"/static/items/{candidates[idx]}"
 
 
 # ── 유틸리티 함수 ───────────────────────────────────────
@@ -130,7 +168,8 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
         # 캐시 히트: 즉시 응답 (Claude API 호출 없음)
         item_name = cached.name
         item_description = cached.description
-        image_url = cached.image_url
+        # 이미지가 비어 있는 캐시행(텍스트만 생성된 경우)도 기존 이미지로 폴백
+        image_url = cached.image_url or _pick_fallback_image(cache_key, grade)
         cache_status = "HIT"
     else:
         # 캐시 미스: Claude만 동기 호출, 이미지는 None
@@ -149,9 +188,12 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
 
         item_name = ai_result["name"]
         item_description = ai_result["description"]
-        image_url = "/static/items/placeholder.png" # 단계 1: 사전생성 캐시 미스시 placeholder
+        # 사전 생성 이미지가 아직 없으므로 기존 이미지 중 하나를 재활용 (placeholder 대체)
+        image_url = _pick_fallback_image(cache_key, grade)
 
         # 다음 동일 요청에서 Claude 재호출 안 하도록 캐시에 저장
+        # image_url은 None으로 둔다 -> 나중에 진짜 이미지를 생성하면 그 값을 채울 수 있고,
+        #   런타임에는 _pick_fallback_image가 매번 같은 그림을 결정적으로 돌려준다.
         new_cache = GeneratedItemCache(
             keyword_ids_key=cache_key,
             grade=grade,
@@ -253,7 +295,7 @@ def get_craft_history(
         cached = db.query(GeneratedItemCache).filter_by(
             keyword_ids_key=cache_key
         ).first()
-        image_url = cached.image_url if cached else None
+        image_url = (cached.image_url if cached else None) or _pick_fallback_image(cache_key, item.grade)
 
         result.append({
             "id": item.id,
