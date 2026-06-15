@@ -23,6 +23,9 @@ class SellRequest(BaseModel):
     item_id:       int
     quantity:      int = Field(1, ge=1)
     discount_rate: float = Field(0.0, ge=0.0, le=0.7)
+    # 판매 페이즈의 '현재 날짜'. 클라이언트가 트렌드 곡선상의 어느 시점에 파는지 전달.
+    # None이면 서버에 저장된 item.current_day(기본 0)를 사용 -> 0이면 트렌드 0이라 수익 0이 됨.
+    current_day:   Optional[int] = None
 
 class SellResponse(BaseModel):
     revenue:         float

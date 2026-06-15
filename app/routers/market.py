@@ -48,7 +48,7 @@ def register_item(body: MarketItemCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/trend/{item_id}")
-def get_trend(item_id: int, days: int = 60, db: Session = Depends(get_db)):
+def get_trend(item_id: int, days: int = 60, current_day: int | None = None, db: Session = Depends(get_db)):
     item = db.query(MarketItem).filter(MarketItem.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail={
@@ -61,7 +61,9 @@ def get_trend(item_id: int, days: int = 60, db: Session = Depends(get_db)):
         TrendDataPoint(day=d, index=calculate_trend_index(item, d))
         for d in range(item.release_day, item.release_day + days)
     ]
-    current_index = calculate_trend_index(item, item.current_day)
+    # current_day를 주면 그 시점의 트렌드 지수를, 없으면 저장된 item.current_day 사용
+    cd = current_day if current_day is not None else item.current_day
+    current_index = calculate_trend_index(item, cd)
 
     return {
         "status": "success",
@@ -92,7 +94,9 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
             "message": f"재고가 부족합니다 (현재 재고: {item.stock})"
         })
 
-    trend_index = calculate_trend_index(item, item.current_day)
+    # 트렌드 지수는 '현재 날짜' 기준. 클라이언트가 current_day를 주면 그 날짜로 계산.
+    sell_day = body.current_day if body.current_day is not None else item.current_day
+    trend_index = calculate_trend_index(item, sell_day)
     sell_price = item.base_value * (trend_index / 100) * (1 - body.discount_rate)
     revenue = round(sell_price * body.quantity, 1)
 
