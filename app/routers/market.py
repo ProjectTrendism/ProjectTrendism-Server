@@ -1,17 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.market import MarketItem, Settlement
+from app.models.market import MarketItem, Settlement, MarketState
 from app.models.keyword import Keyword
 from app.models.explore import Season
 from app.schemas.market import (
     MarketItemCreate, MarketItemResponse,
     SellRequest, SellResponse,
     TrendDataPoint, SettlementResponse,
-    AdjustNodeRequest, PriceAdjustRequest
+    AdjustNodeRequest, PriceAdjustRequest, AdvanceDayRequest
 )
 from app.services.claude_service import analyze_sales_performance
-import math, random
+import math
 
 router = APIRouter(prefix="/market", tags=["Market"])
 
@@ -38,17 +38,154 @@ def calculate_trend_index(item: MarketItem, current_day: int) -> float:
     return round(index, 2)
 
 
+def get_or_create_market_state(db: Session, season_id: int) -> MarketState:
+    state = db.query(MarketState).filter(MarketState.season_id == season_id).first()
+    if not state:
+        state = MarketState(season_id=season_id, current_day=0)
+        db.add(state)
+        db.commit()
+        db.refresh(state)
+    return state
+
+
+PRICE_SENSITIVITY = 1.0  # 가격 탄력성. 클수록 가격이 base_value에서 멀어질 때 수요가 더 민감하게 변함
+FIRE_SALE_PENALTY = 0.3  # /sell(즉시청산) 고정 페널티. current_price 대비 이 비율만큼 깎고 즉시 판매
+
+
+def calculate_daily_demand(item: MarketItem, trend_index: float, stock: int, base_buyers: int = 10) -> tuple[int, int]:
+    """advance-day 판매 resolve용. simulate_buyers와 같은 수요 공식을 쓰되,
+    random 노이즈/베르누이 샘플링 대신 결정적 기대값(반올림)을 사용한다 (재현 가능해야 해서)."""
+    if trend_index <= 0 or stock <= 0:
+        return 0, 0
+
+    grade_multiplier = {"S": 2.0, "A": 1.5, "B": 1.0, "C": 0.5}
+    g_mult = grade_multiplier.get(item.grade, 1.0)
+
+    # base_value를 공정가 앵커로 삼아 current_price가 비쌀수록 수요를 깎는다.
+    price_ratio = item.current_price / item.base_value if item.base_value > 0 else 1.0
+    price_factor = max(0.0, min(1.5, 1.0 - PRICE_SENSITIVITY * (price_ratio - 1.0)))
+
+    raw_buyers = base_buyers * (trend_index / 100) * g_mult * price_factor
+    buyers = max(0, round(raw_buyers))
+
+    buy_prob = min(0.8, trend_index / 120)
+    sold = min(round(buyers * buy_prob), buyers, stock)
+
+    return buyers, sold
+
+
+def accumulate_settlement(db: Session, season_id: int, revenue: float) -> Settlement:
+    settlement = db.query(Settlement).filter(Settlement.season_id == season_id).first()
+    if not settlement:
+        settlement = Settlement(
+            season_id=season_id,
+            total_revenue=revenue,
+            material_cost=0,
+            rent_cost=500,
+            marketing_cost=0,
+            management_cost=200,
+            net_profit=revenue - 500 - 200
+        )
+        db.add(settlement)
+    else:
+        settlement.total_revenue = (settlement.total_revenue or 0) + revenue
+        settlement.material_cost = settlement.material_cost or 0
+        settlement.rent_cost = settlement.rent_cost or 500
+        settlement.marketing_cost = settlement.marketing_cost or 0
+        settlement.management_cost = settlement.management_cost or 200
+        settlement.net_profit = (
+            settlement.total_revenue
+            - settlement.material_cost
+            - settlement.rent_cost
+            - settlement.marketing_cost
+            - settlement.management_cost
+        )
+    return settlement
+
+
 @router.post("/items", status_code=201)
 def register_item(body: MarketItemCreate, db: Session = Depends(get_db)):
-    item = MarketItem(**body.dict())
+    active_season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    active_season_id = active_season.id if active_season else 1
+    market_state = get_or_create_market_state(db, active_season_id)
+
+    item_data = body.dict()
+    item_data["release_day"] = market_state.current_day
+    item_data["season_id"] = active_season_id
+    item_data["current_price"] = item_data["base_value"]
+    item = MarketItem(**item_data)
     db.add(item)
     db.commit()
     db.refresh(item)
     return {"status": "success", "data": MarketItemResponse.from_orm(item).dict()}
 
 
+@router.post("/advance-day")
+def advance_day(body: AdvanceDayRequest, db: Session = Depends(get_db)):
+    active_season = db.query(Season).filter(Season.status == "ACTIVE").first()
+    active_season_id = active_season.id if active_season else 1
+    market_state = get_or_create_market_state(db, active_season_id)
+
+    active_items = db.query(MarketItem).filter(
+        MarketItem.season_id == active_season_id,
+        MarketItem.status == "ACTIVE"
+    ).all()
+
+    sales_by_item = {item.id: {"sold_today": 0, "revenue_today": 0.0} for item in active_items}
+    total_revenue = 0.0
+
+    for _ in range(body.days):
+        market_state.current_day += 1
+
+        for item in active_items:
+            if item.status != "ACTIVE" or item.stock <= 0:
+                continue
+
+            trend_index = calculate_trend_index(item, market_state.current_day)
+            _, sold = calculate_daily_demand(item, trend_index, item.stock)
+            if sold <= 0:
+                continue
+
+            revenue_today = round(sold * item.current_price, 1)
+
+            item.stock -= sold
+            if item.stock == 0:
+                item.status = "SOLD_OUT"
+
+            sales_by_item[item.id]["sold_today"] += sold
+            sales_by_item[item.id]["revenue_today"] = round(
+                sales_by_item[item.id]["revenue_today"] + revenue_today, 1
+            )
+            total_revenue += revenue_today
+
+    if total_revenue > 0:
+        accumulate_settlement(db, active_season_id, round(total_revenue, 1))
+
+    db.commit()
+
+    items_data = [
+        {
+            "item_id": item.id,
+            "trend_index": calculate_trend_index(item, market_state.current_day),
+            "remaining_stock": item.stock,
+            "status": item.status,
+            "sold_today": sales_by_item[item.id]["sold_today"],
+            "revenue_today": sales_by_item[item.id]["revenue_today"]
+        }
+        for item in active_items
+    ]
+
+    return {
+        "status": "success",
+        "data": {
+            "current_day": market_state.current_day,
+            "items": items_data
+        }
+    }
+
+
 @router.get("/trend/{item_id}")
-def get_trend(item_id: int, days: int = 60, current_day: int | None = None, db: Session = Depends(get_db)):
+def get_trend(item_id: int, days: int = 60, db: Session = Depends(get_db)):
     item = db.query(MarketItem).filter(MarketItem.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail={
@@ -61,9 +198,9 @@ def get_trend(item_id: int, days: int = 60, current_day: int | None = None, db: 
         TrendDataPoint(day=d, index=calculate_trend_index(item, d))
         for d in range(item.release_day, item.release_day + days)
     ]
-    # current_day를 주면 그 시점의 트렌드 지수를, 없으면 저장된 item.current_day 사용
-    cd = current_day if current_day is not None else item.current_day
-    current_index = calculate_trend_index(item, cd)
+    # 서버 클럭(MarketState, item의 시즌 기준) 날짜로 현재 트렌드 지수를 계산
+    market_state = get_or_create_market_state(db, item.season_id)
+    current_index = calculate_trend_index(item, market_state.current_day)
 
     return {
         "status": "success",
@@ -94,45 +231,20 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
             "message": f"재고가 부족합니다 (현재 재고: {item.stock})"
         })
 
-    # 트렌드 지수는 '현재 날짜' 기준. 클라이언트가 current_day를 주면 그 날짜로 계산.
-    sell_day = body.current_day if body.current_day is not None else item.current_day
-    trend_index = calculate_trend_index(item, sell_day)
-    sell_price = item.base_value * (trend_index / 100) * (1 - body.discount_rate)
-    revenue = round(sell_price * body.quantity, 1)
+    # 즉시청산: trend/할인율 안 쓰고, current_price에 고정 페널티만 적용
+    sold = min(body.quantity, item.stock)
+    revenue = round(sold * item.current_price * (1 - FIRE_SALE_PENALTY), 1)
 
-    item.stock -= body.quantity
+    item.stock -= sold
     if item.stock == 0:
         item.status = "SOLD_OUT"
+
+    accumulate_settlement(db, item.season_id, revenue)
     db.commit()
 
-    active_season = db.query(Season).filter(Season.status == "ACTIVE").first()
-    active_season_id = active_season.id if active_season else 1
-    settlement = db.query(Settlement).filter(Settlement.season_id == active_season_id).first()
-    if not settlement:
-        settlement = Settlement(
-            season_id=active_season_id,
-            total_revenue=revenue,
-            material_cost=0,
-            rent_cost=500,
-            marketing_cost=0,
-            management_cost=200,
-            net_profit=revenue - 500 - 200
-        )
-        db.add(settlement)
-    else:
-        settlement.total_revenue = (settlement.total_revenue or 0) + revenue
-        settlement.material_cost = settlement.material_cost or 0
-        settlement.rent_cost = settlement.rent_cost or 500
-        settlement.marketing_cost = settlement.marketing_cost or 0
-        settlement.management_cost = settlement.management_cost or 200
-        settlement.net_profit = (
-            settlement.total_revenue
-            - settlement.material_cost
-            - settlement.rent_cost
-            - settlement.marketing_cost
-            - settlement.management_cost
-        )
-    db.commit()
+    # trend_index는 가격에 영향 없는 informational 값 -- 서버 클럭(item의 시즌) 기준
+    market_state = get_or_create_market_state(db, item.season_id)
+    trend_index = calculate_trend_index(item, market_state.current_day)
 
     return {
         "status": "success",
@@ -350,36 +462,20 @@ def simulate_buyers(
             "message": f"아이템 ID {item_id}가 존재하지 않습니다"
         })
 
-    grade_multiplier = {"S": 2.0, "A": 1.5, "B": 1.0, "C": 0.5}
-    g_mult = grade_multiplier.get(item.grade, 1.0)
-
     simulation = []
     cumulative_revenue = 0.0
     remaining_stock = item.stock
 
-    for d in range(days):
+    for d in range(1, days + 1):
         current_day = item.release_day + d
         trend = calculate_trend_index(item, current_day)
 
-        # 구매자 수 = base × (trend/100) × grade보정 × 약간의 랜덤
-        if trend <= 0 or remaining_stock <= 0:
-            buyers = 0
-            sold = 0
-        else:
-            raw_buyers = base_buyers * (trend / 100) * g_mult
-            noise = random.uniform(0.7, 1.3)
-            buyers = max(0, int(raw_buyers * noise))
+        # advance-day(POST /market/advance-day)와 동일한 결정적 수요 공식 재사용 -- 예측=실제.
+        buyers, sold = calculate_daily_demand(item, trend, remaining_stock, base_buyers)
 
-            # 실제 판매 (구매자 중 일부만 구매)
-            buy_prob = min(0.8, trend / 120)
-            sold = 0
-            for _ in range(min(buyers, remaining_stock)):
-                if random.random() < buy_prob:
-                    sold += 1
-
-            sold = min(sold, remaining_stock)
+        if sold > 0:
             remaining_stock -= sold
-            day_revenue = sold * item.base_value * (trend / 100)
+            day_revenue = sold * item.current_price
             cumulative_revenue += day_revenue
 
         simulation.append({
@@ -432,8 +528,8 @@ def adjust_price(body: PriceAdjustRequest, db: Session = Depends(get_db)):
             "message": f"아이템 ID {body.item_id}가 존재하지 않습니다"
         })
 
-    old_price = item.base_value
-    item.base_value = body.new_price
+    old_price = item.current_price
+    item.current_price = body.new_price
     db.commit()
 
     change_pct = round((body.new_price - old_price) / old_price * 100, 1) if old_price > 0 else 0

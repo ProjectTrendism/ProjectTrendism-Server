@@ -1,5 +1,4 @@
 from pydantic import BaseModel, Field
-from typing import Optional
 
 class MarketItemCreate(BaseModel):
     item_name:   str
@@ -10,12 +9,13 @@ class MarketItemCreate(BaseModel):
     release_day: int = 0
 
 class MarketItemResponse(BaseModel):
-    id:          int
-    item_name:   str
-    grade:       str
-    base_value:  float
-    stock:       int
-    status:      str
+    id:            int
+    item_name:     str
+    grade:         str
+    base_value:    float
+    current_price: float
+    stock:         int
+    status:        str
     class Config:
         from_attributes = True
 
@@ -23,9 +23,6 @@ class SellRequest(BaseModel):
     item_id:       int
     quantity:      int = Field(1, ge=1)
     discount_rate: float = Field(0.0, ge=0.0, le=0.7)
-    # 판매 페이즈의 '현재 날짜'. 클라이언트가 트렌드 곡선상의 어느 시점에 파는지 전달.
-    # None이면 서버에 저장된 item.current_day(기본 0)를 사용 -> 0이면 트렌드 0이라 수익 0이 됨.
-    current_day:   Optional[int] = None
 
 class SellResponse(BaseModel):
     revenue:         float
@@ -52,6 +49,9 @@ class SettlementResponse(BaseModel):
 class AdjustNodeRequest(BaseModel):
     node:      str
     new_value: float = Field(..., ge=0)
+
+class AdvanceDayRequest(BaseModel):
+    days: int = Field(1, ge=1)
 
 class SalesAnalysisResponse(BaseModel):
     summary:          str

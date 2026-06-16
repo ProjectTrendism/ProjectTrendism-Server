@@ -6,14 +6,23 @@ class MarketItem(Base):
     __tablename__ = "market_items"
 
     id            = Column(Integer, primary_key=True, index=True)
+    season_id     = Column(Integer, index=True)
     item_name     = Column(String, nullable=False)
     keyword_ids   = Column(JSON)         # [1, 11, 21]
     grade         = Column(String)       # S / A / B / C
     base_value    = Column(Float)        # 제작 시 산정된 최종 가치
+    current_price = Column(Float)        # 플레이어가 조정한 판매가 (base_value로 초기화)
     stock         = Column(Integer, default=1)
     release_day   = Column(Integer, default=0)  # 출시 시점 (게임 내 일수)
     current_day   = Column(Integer, default=0)  # 현재 일수
     status        = Column(String, default="ACTIVE")  # ACTIVE / SOLD_OUT / DEAD
+
+class MarketState(Base):
+    """시즌별 시장 시계 (게임 내 경과일)"""
+    __tablename__ = "market_states"
+
+    season_id   = Column(Integer, primary_key=True, index=True)
+    current_day = Column(Integer, default=0)
 
 class Settlement(Base):
     """시즌별 정산"""
