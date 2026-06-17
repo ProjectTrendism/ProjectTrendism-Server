@@ -12,6 +12,7 @@ class MarketItem(Base):
     grade         = Column(String)       # S / A / B / C
     base_value    = Column(Float)        # 제작 시 산정된 최종 가치
     current_price = Column(Float)        # 플레이어가 조정한 판매가 (base_value로 초기화)
+    material_cost = Column(Float, default=0)    # 키워드 희귀도 기반 재료비
     stock         = Column(Integer, default=1)
     release_day   = Column(Integer, default=0)  # 출시 시점 (게임 내 일수)
     current_day   = Column(Integer, default=0)  # 현재 일수

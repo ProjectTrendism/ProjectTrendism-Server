@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.database import get_db
 from app.models.market import MarketItem, Settlement, MarketState
 from app.models.keyword import Keyword
 from app.models.explore import Season
+from app.models.frequency import KeywordFrequency
 from app.schemas.market import (
     MarketItemCreate, MarketItemResponse,
     SellRequest, SellResponse,
@@ -12,6 +14,11 @@ from app.schemas.market import (
 )
 from app.services.claude_service import analyze_sales_performance
 import math
+import random
+
+# 키워드 희귀도별 재료비 (keyword 1개당 G)
+KEYWORD_RARITY_COST = {"COMMON": 150, "RARE": 450, "LEGEND": 900}
+DEFAULT_KEYWORD_COST = 200
 
 router = APIRouter(prefix="/market", tags=["Market"])
 
@@ -50,23 +57,56 @@ def get_or_create_market_state(db: Session, season_id: int) -> MarketState:
 
 PRICE_SENSITIVITY = 1.0  # 가격 탄력성. 클수록 가격이 base_value에서 멀어질 때 수요가 더 민감하게 변함
 FIRE_SALE_PENALTY = 0.3  # /sell(즉시청산) 고정 페널티. current_price 대비 이 비율만큼 깎고 즉시 판매
+TREND_MIN_THRESHOLD = 5.0  # 이 수치 미만이면 당일 구매자 0명 (재고 묶임)
 
 
-def calculate_daily_demand(item: MarketItem, trend_index: float, stock: int, base_buyers: int = 10) -> tuple[int, int]:
-    """advance-day 판매 resolve용. simulate_buyers와 같은 수요 공식을 쓰되,
-    random 노이즈/베르누이 샘플링 대신 결정적 기대값(반올림)을 사용한다 (재현 가능해야 해서)."""
-    if trend_index <= 0 or stock <= 0:
+def _keyword_heat_bonus(keyword_ids: list, season_id: int, db: Session) -> float:
+    """아이템 키워드들의 시즌 열기 레벨 평균 → 트렌드 배율 반환.
+    HOT=×1.4 / WARM=×1.2 / COLD 또는 미탐험=×0.8"""
+    if not keyword_ids:
+        return 1.0
+    total = 0.0
+    for kid in keyword_ids:
+        freq = db.query(KeywordFrequency).filter(
+            KeywordFrequency.season_id == season_id,
+            KeywordFrequency.keyword_id == kid
+        ).first()
+        if not freq:
+            total += 0.8  # 탐험하지 않은 키워드 → 페널티
+            continue
+        npc_count = len(freq.npc_sources or [])
+        if npc_count >= 3 or freq.mention_count >= 5:
+            total += 1.4  # HOT
+        elif npc_count >= 2 or freq.mention_count >= 3:
+            total += 1.2  # WARM
+        else:
+            total += 0.9  # COLD
+    return total / len(keyword_ids)
+
+
+def _saturation_factor(current_day: int) -> float:
+    """날이 갈수록 시장 포화 → 구매자 점감. 최소 30% 유지."""
+    return max(0.3, 1.0 - current_day * 0.005)
+
+
+def calculate_daily_demand(item: MarketItem, trend_index: float, stock: int, base_buyers: int = 5) -> tuple[int, int]:
+    """advance-day 판매 resolve용.
+    - trend_index < TREND_MIN_THRESHOLD: 구매자 없음 (판매 실패 가능)
+    - 수요에 시장 변동 노이즈(gauss) 적용 → 흉일/호일 발생"""
+    if trend_index < TREND_MIN_THRESHOLD or stock <= 0:
         return 0, 0
 
     grade_multiplier = {"S": 2.0, "A": 1.5, "B": 1.0, "C": 0.5}
     g_mult = grade_multiplier.get(item.grade, 1.0)
 
-    # base_value를 공정가 앵커로 삼아 current_price가 비쌀수록 수요를 깎는다.
     price_ratio = item.current_price / item.base_value if item.base_value > 0 else 1.0
     price_factor = max(0.0, min(1.5, 1.0 - PRICE_SENSITIVITY * (price_ratio - 1.0)))
 
     raw_buyers = base_buyers * (trend_index / 100) * g_mult * price_factor
-    buyers = max(0, round(raw_buyers))
+
+    # 시장 변동 노이즈: 평균 1.0, 표준편차 0.45 → 약 25% 확률로 0.5 미만(부진)
+    market_factor = max(0.0, random.gauss(1.0, 0.45))
+    buyers = max(0, round(raw_buyers * market_factor))
 
     buy_prob = min(0.8, trend_index / 120)
     sold = min(round(buyers * buy_prob), buyers, stock)
@@ -74,22 +114,34 @@ def calculate_daily_demand(item: MarketItem, trend_index: float, stock: int, bas
     return buyers, sold
 
 
+def _calc_season_material_cost(db: Session, season_id: int) -> float:
+    """해당 시즌에 등록된 아이템들의 material_cost 합산"""
+    total = db.query(func.sum(MarketItem.material_cost)).filter(
+        MarketItem.season_id == season_id
+    ).scalar()
+    return float(total or 0)
+
+
 def accumulate_settlement(db: Session, season_id: int, revenue: float) -> Settlement:
+    material = _calc_season_material_cost(db, season_id)
     settlement = db.query(Settlement).filter(Settlement.season_id == season_id).first()
     if not settlement:
+        rent = 500
+        marketing = 0
+        management = 200
         settlement = Settlement(
             season_id=season_id,
             total_revenue=revenue,
-            material_cost=0,
-            rent_cost=500,
-            marketing_cost=0,
-            management_cost=200,
-            net_profit=revenue - 500 - 200
+            material_cost=material,
+            rent_cost=rent,
+            marketing_cost=marketing,
+            management_cost=management,
+            net_profit=revenue - material - rent - marketing - management
         )
         db.add(settlement)
     else:
         settlement.total_revenue = (settlement.total_revenue or 0) + revenue
-        settlement.material_cost = settlement.material_cost or 0
+        settlement.material_cost = material
         settlement.rent_cost = settlement.rent_cost or 500
         settlement.marketing_cost = settlement.marketing_cost or 0
         settlement.management_cost = settlement.management_cost or 200
@@ -113,6 +165,16 @@ def register_item(body: MarketItemCreate, db: Session = Depends(get_db)):
     item_data["release_day"] = market_state.current_day
     item_data["season_id"] = active_season_id
     item_data["current_price"] = item_data["base_value"]
+
+    # 키워드 희귀도 기반 재료비 계산
+    keyword_ids = item_data.get("keyword_ids") or []
+    material = 0
+    for kid in keyword_ids:
+        kw = db.query(Keyword).filter(Keyword.id == kid).first()
+        rarity = kw.rarity if kw else None
+        material += KEYWORD_RARITY_COST.get(rarity, DEFAULT_KEYWORD_COST)
+    item_data["material_cost"] = material
+
     item = MarketItem(**item_data)
     db.add(item)
     db.commit()
@@ -136,13 +198,22 @@ def advance_day(body: AdvanceDayRequest, db: Session = Depends(get_db)):
 
     for _ in range(body.days):
         market_state.current_day += 1
+        saturation = _saturation_factor(market_state.current_day)
 
         for item in active_items:
             if item.status != "ACTIVE" or item.stock <= 0:
                 continue
 
-            trend_index = calculate_trend_index(item, market_state.current_day)
-            _, sold = calculate_daily_demand(item, trend_index, item.stock)
+            base_index = calculate_trend_index(item, market_state.current_day)
+            heat_bonus = _keyword_heat_bonus(
+                item.keyword_ids or [], active_season_id, db
+            )
+            # 키워드 열기 평균이 1.0 미만 (COLD/미탐험) → 해당 일 구매자 없음
+            if heat_bonus < 1.0:
+                continue
+            effective_index = base_index * heat_bonus
+            effective_buyers = max(1, round(5 * saturation))
+            _, sold = calculate_daily_demand(item, effective_index, item.stock, effective_buyers)
             if sold <= 0:
                 continue
 
@@ -224,6 +295,13 @@ def sell_item(body: SellRequest, db: Session = Depends(get_db)):
             "message": f"아이템 ID {body.item_id}가 존재하지 않습니다"
         })
 
+    if item.status == "DEAD":
+        raise HTTPException(status_code=409, detail={
+            "status": "error",
+            "error_code": "ITEM_DEAD",
+            "message": "이전 사이클에서 판매되지 않은 상품입니다. 유행이 완전히 지나 판매 불가능합니다."
+        })
+
     if item.stock < body.quantity:
         raise HTTPException(status_code=409, detail={
             "status": "error",
@@ -268,6 +346,18 @@ def get_settlement(season_id: int, db: Session = Depends(get_db)):
             "error_code": "SETTLEMENT_NOT_FOUND",
             "message": f"시즌 {season_id} 정산 데이터가 없습니다"
         })
+
+    # 재료비는 등록된 아이템에서 실시간 합산 (누락 방지)
+    material = _calc_season_material_cost(db, season_id)
+    settlement.material_cost = material
+    settlement.net_profit = (
+        (settlement.total_revenue or 0)
+        - material
+        - (settlement.rent_cost or 500)
+        - (settlement.marketing_cost or 0)
+        - (settlement.management_cost or 200)
+    )
+    db.commit()
 
     penalty = settlement.net_profit < settlement.penalty_threshold
 

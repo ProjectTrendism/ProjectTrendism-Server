@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import exists as sa_exists
 from app.database import get_db
 from app.models.explore import Season, NPC, Event, PlayerInventory, SeasonNPCInfo
 from app.models.keyword import Keyword
 from app.models.frequency import KeywordFrequency, HiddenKeyword
+from app.models.market import MarketItem
 from app.schemas.explore import (
     SeasonStatus, ActionRequest, ActionResult,
     EventResponse, InventoryItem, DayEndResult
@@ -193,6 +195,13 @@ def start_season(reset: bool = False, db: Session = Depends(get_db)):
     ).order_by(Season.id.asc()).first()
 
     if not season:
+        # PENDING도 없으면 NPC가 배정된 FINISHED 시즌 중 id가 가장 낮은 것을 재활용
+        season = db.query(Season).filter(
+            Season.status == "FINISHED",
+            sa_exists().where(SeasonNPCInfo.season_id == Season.id)
+        ).order_by(Season.id.asc()).first()
+
+    if not season:
         raise HTTPException(status_code=409, detail={
             "status": "error",
             "error_code": "NO_PENDING_SEASON",
@@ -203,6 +212,20 @@ def start_season(reset: bool = False, db: Session = Depends(get_db)):
     season.current_day = 1
     season.current_time = 8
     season.phase = "EXPLORE"
+
+    # FINISHED 시즌 재활용 시 이전 데이터 초기화
+    db.query(PlayerInventory).filter(
+        PlayerInventory.season_id == season.id
+    ).delete()
+
+    db.query(SeasonNPCInfo).filter(
+        SeasonNPCInfo.season_id == season.id
+    ).update({"talked": False, "perceived_reliability": None})
+
+    db.query(KeywordFrequency).filter(
+        KeywordFrequency.season_id == season.id
+    ).delete()
+
     db.commit()
     db.refresh(season)
 
@@ -216,7 +239,8 @@ def start_season(reset: bool = False, db: Session = Depends(get_db)):
 # ── POST /explore/next-cycle  사이클 전환 ───────────────
 @router.post("/next-cycle")
 def next_cycle(db: Session = Depends(get_db)):
-    """현재 ACTIVE 시즌을 FINISHED로 닫고 다음 PENDING 시즌을 ACTIVE로 엽니다."""
+    """현재 ACTIVE 시즌을 FINISHED로 닫고 다음 시즌을 ACTIVE로 엽니다.
+    PENDING 시즌이 없으면 NPC가 배정된 FINISHED 시즌을 재활용합니다."""
     current = db.query(Season).filter(Season.status == "ACTIVE").first()
     if not current:
         raise HTTPException(status_code=404, detail={
@@ -225,20 +249,43 @@ def next_cycle(db: Session = Depends(get_db)):
             "message": "진행 중인 시즌이 없습니다"
         })
 
-    current.status = "FINISHED"
-    db.flush()
+    current_id = current.id
 
+    # 다음 시즌 후보 탐색 (FINISHED로 바꾸기 전에 확인)
     next_season = db.query(Season).filter(
         Season.status == "PENDING"
     ).order_by(Season.id.asc()).first()
 
     if not next_season:
-        db.commit()
+        # PENDING 없으면 current_id보다 큰 FINISHED 시즌 중 다음 순번 선택 (순환)
+        next_season = db.query(Season).filter(
+            Season.status == "FINISHED",
+            Season.id > current_id,
+            sa_exists().where(SeasonNPCInfo.season_id == Season.id)
+        ).order_by(Season.id.asc()).first()
+
+    if not next_season:
+        # wrap-around: current_id 이하 FINISHED 시즌 중 최솟값
+        next_season = db.query(Season).filter(
+            Season.status == "FINISHED",
+            Season.id != current_id,
+            sa_exists().where(SeasonNPCInfo.season_id == Season.id)
+        ).order_by(Season.id.asc()).first()
+
+    if not next_season:
         raise HTTPException(status_code=409, detail={
             "status": "error",
             "error_code": "NO_PENDING_SEASON",
-            "message": "다음 시즌이 없습니다. seeds/pregenerate_seasons.py 를 추가 실행하세요"
+            "message": "전환할 시즌이 없습니다. seeds/pregenerate_seasons.py 를 추가 실행하세요"
         })
+
+    # 여기서부터 실제 전환 (다음 시즌 확보 확인 후)
+    current.status = "FINISHED"
+    # 시즌 종료: 팔리지 않은 ACTIVE 아이템 → DEAD (다음 사이클에서 판매 완전 불가)
+    db.query(MarketItem).filter(
+        MarketItem.season_id == current_id,
+        MarketItem.status == "ACTIVE"
+    ).update({"status": "DEAD"})
 
     next_season.status = "ACTIVE"
     next_season.current_day = 1
@@ -823,12 +870,19 @@ def end_day(db: Session = Depends(get_db)):
 def dev_reset(db: Session = Depends(get_db)):
     season = db.query(Season).filter(Season.status == "ACTIVE").first()
     if not season:
+        # ACTIVE 없으면 NPC가 배정된 FINISHED 시즌 중 id가 가장 낮은 것을 재활용
+        season = db.query(Season).filter(
+            Season.status == "FINISHED",
+            sa_exists().where(SeasonNPCInfo.season_id == Season.id)
+        ).order_by(Season.id.asc()).first()
+    if not season:
         raise HTTPException(status_code=404, detail={
             "status": "error",
             "error_code": "NO_ACTIVE_SEASON",
             "message": "진행 중인 시즌이 없습니다"
         })
 
+    season.status = "ACTIVE"
     season.current_day = 1
     season.current_time = 8
     season.phase = "EXPLORE"
