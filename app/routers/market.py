@@ -341,8 +341,9 @@ def analyze_item(item_id: int, db: Session = Depends(get_db)):
         keywords = db.query(Keyword).filter(Keyword.id.in_(item.keyword_ids)).all()
         keyword_names = [k.name for k in keywords]
 
-    trend_index = calculate_trend_index(item, item.current_day)
-    days_on_market = max(0, item.current_day - item.release_day)
+    market_state = get_or_create_market_state(db, item.season_id)
+    trend_index = calculate_trend_index(item, market_state.current_day)
+    days_on_market = max(0, market_state.current_day - item.release_day)
 
     # 매출 계산 (정산 테이블에서)
     active_season = db.query(Season).filter(Season.status == "ACTIVE").first()

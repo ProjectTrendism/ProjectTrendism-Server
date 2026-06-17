@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models.keyword import Keyword
 from app.models.craft import (
@@ -194,15 +195,24 @@ def predict_result(body: PredictRequest, db: Session = Depends(get_db)):
         # 다음 동일 요청에서 Claude 재호출 안 하도록 캐시에 저장
         # image_url은 None으로 둔다 -> 나중에 진짜 이미지를 생성하면 그 값을 채울 수 있고,
         #   런타임에는 _pick_fallback_image가 매번 같은 그림을 결정적으로 돌려준다.
-        new_cache = GeneratedItemCache(
-            keyword_ids_key=cache_key,
-            grade=grade,
-            name=item_name,
-            description=item_description,
-            image_url=None
-        )
-        db.add(new_cache)
-        db.commit()
+        try:
+            new_cache = GeneratedItemCache(
+                keyword_ids_key=cache_key,
+                grade=grade,
+                name=item_name,
+                description=item_description,
+                image_url=None
+            )
+            db.add(new_cache)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing = db.query(GeneratedItemCache).filter_by(
+                keyword_ids_key=cache_key
+            ).first()
+            if existing:
+                item_name = existing.name
+                item_description = existing.description
         cache_status = "MISS"
 
     # 조합 사용 완료 처리

@@ -10,6 +10,7 @@ class MarketItemCreate(BaseModel):
 
 class MarketItemResponse(BaseModel):
     id:            int
+    season_id:     int
     item_name:     str
     grade:         str
     base_value:    float

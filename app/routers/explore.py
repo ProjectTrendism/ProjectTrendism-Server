@@ -132,12 +132,36 @@ def _get_npc_season_data(season_id: int, npc: NPC, db: Session) -> dict:
     }
 
 
-# ── POST /explore/start  시즌 시작 ──────────────────────
+# ── 사이클 헬퍼 ──────────────────────────────────────────
+def _get_cycle_number(season: Season, db: Session) -> int:
+    """현재 시즌 이전에 FINISHED 된 시즌 수 + 1 = 사이클 번호"""
+    finished_count = db.query(Season).filter(
+        Season.status == "FINISHED",
+        Season.id < season.id
+    ).count()
+    return finished_count + 1
+
+
+def _season_status_payload(season: Season, db: Session) -> dict:
+    data = SeasonStatus.from_orm(season).dict()
+    data["cycle_number"] = _get_cycle_number(season, db)
+    return data
+
+
+# ── POST /explore/start  시즌 시작 (멱등) ───────────────
 @router.post("/start")
-def start_season(db: Session = Depends(get_db)):
-    # 이미 진행 중인 시즌이 있으면 초기화 후 재시작 (새 탐험 세션)
+def start_season(reset: bool = False, db: Session = Depends(get_db)):
     existing = db.query(Season).filter(Season.status == "ACTIVE").first()
     if existing:
+        if not reset:
+            # 이미 활성 시즌이 있고 reset=False → 현재 상태 그대로 반환 (멱등성)
+            return {
+                "status": "success",
+                "data": _season_status_payload(existing, db),
+                "message": "이미 진행 중인 시즌이 있습니다"
+            }
+
+        # reset=True → 현재 시즌 초기화
         existing.current_day = 1
         existing.current_time = 8
         existing.phase = "EXPLORE"
@@ -159,11 +183,11 @@ def start_season(db: Session = Depends(get_db)):
 
         return {
             "status": "success",
-            "data": SeasonStatus.from_orm(existing).dict(),
-            "message": "시즌 탐험 시작!"
+            "data": _season_status_payload(existing, db),
+            "message": "시즌 탐험 재시작!"
         }
 
-    # 사전 생성된 PENDING 시즌 중 가장 낮은 id를 ACTIVE로 전환
+    # ACTIVE 없음 → 가장 낮은 PENDING 시즌 활성화
     season = db.query(Season).filter(
         Season.status == "PENDING"
     ).order_by(Season.id.asc()).first()
@@ -184,8 +208,63 @@ def start_season(db: Session = Depends(get_db)):
 
     return {
         "status": "success",
-        "data": SeasonStatus.from_orm(season).dict(),
+        "data": _season_status_payload(season, db),
         "message": "시즌 탐험 시작!"
+    }
+
+
+# ── POST /explore/next-cycle  사이클 전환 ───────────────
+@router.post("/next-cycle")
+def next_cycle(db: Session = Depends(get_db)):
+    """현재 ACTIVE 시즌을 FINISHED로 닫고 다음 PENDING 시즌을 ACTIVE로 엽니다."""
+    current = db.query(Season).filter(Season.status == "ACTIVE").first()
+    if not current:
+        raise HTTPException(status_code=404, detail={
+            "status": "error",
+            "error_code": "NO_ACTIVE_SEASON",
+            "message": "진행 중인 시즌이 없습니다"
+        })
+
+    current.status = "FINISHED"
+    db.flush()
+
+    next_season = db.query(Season).filter(
+        Season.status == "PENDING"
+    ).order_by(Season.id.asc()).first()
+
+    if not next_season:
+        db.commit()
+        raise HTTPException(status_code=409, detail={
+            "status": "error",
+            "error_code": "NO_PENDING_SEASON",
+            "message": "다음 시즌이 없습니다. seeds/pregenerate_seasons.py 를 추가 실행하세요"
+        })
+
+    next_season.status = "ACTIVE"
+    next_season.current_day = 1
+    next_season.current_time = 8
+    next_season.phase = "EXPLORE"
+
+    db.query(SeasonNPCInfo).filter(
+        SeasonNPCInfo.season_id == next_season.id
+    ).update({"talked": False, "perceived_reliability": None})
+
+    db.query(PlayerInventory).filter(
+        PlayerInventory.season_id == next_season.id
+    ).delete()
+
+    db.query(KeywordFrequency).filter(
+        KeywordFrequency.season_id == next_season.id
+    ).delete()
+
+    db.commit()
+    db.refresh(next_season)
+
+    cycle_num = _get_cycle_number(next_season, db)
+    return {
+        "status": "success",
+        "data": _season_status_payload(next_season, db),
+        "message": f"사이클 {cycle_num} 시작!"
     }
 
 
@@ -204,12 +283,12 @@ def get_status(db: Session = Depends(get_db)):
     if season.current_time >= 22:
         warning = "[!] 22시 이후! 보안관이 활성화됩니다. 귀가하세요!"
 
+    payload = _season_status_payload(season, db)
+    payload["warning"] = warning
+
     return {
         "status": "success",
-        "data": {
-            **SeasonStatus.from_orm(season).dict(),
-            "warning": warning
-        }
+        "data": payload
     }
 
 
@@ -705,7 +784,7 @@ def end_day(db: Session = Depends(get_db)):
 
     if season.current_day >= 7:
         season.phase = "CRAFT"
-        season.status = "FINISHED"
+        # status는 ACTIVE 유지 — /explore/next-cycle 호출 시 FINISHED로 전환
         db.commit()
         return {
             "status": "success",
@@ -768,8 +847,10 @@ def dev_reset(db: Session = Depends(get_db)):
 
 
     db.commit()
+    db.refresh(season)
 
     return {
         "status": "success",
+        "data": _season_status_payload(season, db),
         "message": "[DEV] 시즌 초기화 완료"
     }
